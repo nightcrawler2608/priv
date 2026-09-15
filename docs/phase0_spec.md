@@ -40,3 +40,13 @@ runtime `robots.txt` check, rate-limited pagination across catalogue pages,
 optional Playwright path documented for JS-rendered sites. All tested offline
 by mocking HTTP responses (`tests/test_fetch_robustness.py`), no live network
 calls in the test suite.
+Phase 3: validate/clean/store — Pydantic `BookRecord` rejects malformed rows
+(negative price, blank title, out-of-range rating) and logs rejections
+(`models.py`); a `row_hash()` fingerprint drives idempotent upserts into
+SQLAlchemy tables `books` (current state) and `book_history` (append-only,
+new row only when the hash changes) — defaults to a local SQLite file,
+swaps to Postgres via `DATABASE_URL` with no code change (`storage/db.py`);
+raw HTML is snapshotted per page, content-addressed by hash so an unchanged
+page is never re-stored (`storage/raw_snapshots.py`). All offline: SQLite
+temp files and tmp_path fixtures, no live network or live DB server needed
+(`tests/test_models.py`, `tests/test_storage.py`, `tests/test_raw_snapshots.py`).

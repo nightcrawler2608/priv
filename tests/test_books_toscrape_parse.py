@@ -20,6 +20,7 @@ def test_parse_books_extracts_known_row():
     assert first.price == 51.77
     assert first.rating == 3
     assert first.availability == "In stock"
+    assert first.url == "https://books.toscrape.com/catalogue/a-light-in-the-attic_1000/index.html"
 
 
 def test_parse_books_handles_out_of_stock_and_zero_rating():
