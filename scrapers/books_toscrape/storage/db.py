@@ -1,10 +1,13 @@
 """
-Phase 3: structured storage via SQLAlchemy.
+Phase 3+4: structured storage via SQLAlchemy.
 
-Two tables:
-- books        current state, one row per book (keyed by url).
-- book_history append-only; a new row is written ONLY when a book's
-                row_hash changes (idempotency + change detection).
+Tables:
+- books         current state, one row per book (keyed by url).
+- book_history  append-only; a new row is written ONLY when a book's
+                 row_hash changes (idempotency + change detection). Tagged
+                 with the job_id that produced it, so a job's results are
+                 queryable on their own (Phase 4's GET /jobs/{id}/results).
+- jobs          one row per scrape job triggered via the API (Phase 4).
 
 Points at PostgreSQL in production via the DATABASE_URL env var, e.g.
     postgresql+psycopg2://user:pass@host:5432/scraper
@@ -30,6 +33,22 @@ class Base(DeclarativeBase):
     pass
 
 
+class JobORM(Base):
+    __tablename__ = "jobs"
+
+    id: Mapped[str] = mapped_column(String, primary_key=True)
+    status: Mapped[str] = mapped_column(String, nullable=False, default="queued")
+    max_pages: Mapped[int] = mapped_column(Integer, nullable=False, default=50)
+    created_at: Mapped[datetime] = mapped_column(DateTime, nullable=False)
+    started_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    finished_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    rows_new: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    rows_changed: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    rows_unchanged: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    rows_rejected: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    error_message: Mapped[str | None] = mapped_column(String, nullable=True)
+
+
 class BookORM(Base):
     __tablename__ = "books"
 
@@ -49,6 +68,7 @@ class BookHistoryORM(Base):
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     url: Mapped[str] = mapped_column(String, ForeignKey("books.url"), nullable=False)
+    job_id: Mapped[str | None] = mapped_column(String, ForeignKey("jobs.id"), nullable=True)
     title: Mapped[str] = mapped_column(String, nullable=False)
     price: Mapped[float] = mapped_column(Float, nullable=False)
     rating: Mapped[int] = mapped_column(Integer, nullable=False)
@@ -74,10 +94,14 @@ def upsert_books(
     session: Session,
     records: list[BookRecord],
     scraped_at: datetime | None = None,
+    job_id: str | None = None,
 ) -> dict[str, int]:
     """Idempotent upsert. Running this twice with identical records leaves
     `book_history` unchanged the second time -- only new or changed rows
-    get a new history entry. Returns counts for a data-quality report."""
+    get a new history entry. Returns counts for a data-quality report.
+
+    job_id, when given, tags each new history row so a specific job's
+    results can be queried back out (see api/main.py's /results endpoint)."""
     scraped_at = scraped_at or datetime.now(timezone.utc)
     stats = {"new": 0, "changed": 0, "unchanged": 0}
 
@@ -92,7 +116,7 @@ def upsert_books(
                 first_seen_at=scraped_at, last_seen_at=scraped_at, last_changed_at=scraped_at,
             ))
             session.add(BookHistoryORM(
-                url=rec.url, title=rec.title, price=rec.price, rating=rec.rating,
+                url=rec.url, job_id=job_id, title=rec.title, price=rec.price, rating=rec.rating,
                 availability=rec.availability, row_hash=h, recorded_at=scraped_at,
             ))
             stats["new"] += 1
@@ -107,7 +131,7 @@ def upsert_books(
             existing.row_hash = h
             existing.last_changed_at = scraped_at
             session.add(BookHistoryORM(
-                url=rec.url, title=rec.title, price=rec.price, rating=rec.rating,
+                url=rec.url, job_id=job_id, title=rec.title, price=rec.price, rating=rec.rating,
                 availability=rec.availability, row_hash=h, recorded_at=scraped_at,
             ))
             stats["changed"] += 1

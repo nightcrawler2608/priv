@@ -50,3 +50,15 @@ raw HTML is snapshotted per page, content-addressed by hash so an unchanged
 page is never re-stored (`storage/raw_snapshots.py`). All offline: SQLite
 temp files and tmp_path fixtures, no live network or live DB server needed
 (`tests/test_models.py`, `tests/test_storage.py`, `tests/test_raw_snapshots.py`).
+Phase 4: backend API + job queue — `api/` package: FastAPI exposes
+POST /jobs (202, hands off to Celery, returns immediately), GET /jobs/{id}
+(status + row counts), GET /jobs/{id}/results (paginated, job-scoped rows),
+GET /jobs/{id}/export (CSV download); `api/tasks.py`'s Celery task wraps the
+full Phase 1-3 pipeline and always resolves the job to `succeeded` or
+`failed` (any exception is caught, job never stuck in `running`). Jobs table
+added to `storage/db.py`; `book_history` rows now carry the `job_id` that
+produced them. Runs behind a real Redis broker in production
+(`REDIS_URL`); tests run Celery in `task_always_eager` mode (synchronous,
+no broker) with the pipeline's network calls faked via the same HTML
+fixture used since Phase 1 (`tests/test_api.py`) — fully offline, 32/32
+tests passing.
