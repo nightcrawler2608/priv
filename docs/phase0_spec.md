@@ -62,3 +62,16 @@ produced them. Runs behind a real Redis broker in production
 no broker) with the pipeline's network calls faked via the same HTML
 fixture used since Phase 1 (`tests/test_api.py`) — fully offline, 32/32
 tests passing.
+Phase 5: frontend dashboard — `frontend/` (Vite + React + TypeScript +
+Tailwind v4 + TanStack Query + Recharts). Job creation form, jobs list that
+polls each job's status every 2s while queued/running and stops once
+resolved, paginated results table with an in-stock/out-of-stock filter, CSV
+download link, and a bar chart of new/changed/unchanged/rejected row counts.
+7 Vitest component tests, all offline (API calls mocked). Manually verified
+end to end in a real browser (Playwright screenshot) against a stub server
+matching the real API's exact response shapes — this sandbox blocks live
+network to books.toscrape.com, so a true success-path run against the real
+site couldn't be demoed here; the real backend's logic is already covered
+by the 32 Phase 1-4 tests, which do run against real (fixture-driven)
+parsing/storage code. Run locally: `npm run dev` in `frontend/` with
+`VITE_API_URL` pointing at a running `uvicorn api.main:app`.
