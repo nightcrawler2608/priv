@@ -189,3 +189,19 @@ export now queries current state from the database after the scrape
 instead of building the file from an in-memory row list, which is both
 more memory-bounded and more correct (reflects every book ever seen, not
 just this run's). 83/83 backend tests passing.
+
+Fixed a real deployment bug found while actually running the full stack
+manually (real Postgres, real Redis, a genuine standalone
+`celery -A api.celery_app worker` process, real API, real frontend --
+not test-suite eager mode): that worker process started up with **zero
+registered tasks**. `celery_app.py` never imported `api.tasks`/
+`api.generic_tasks` itself; task registration only ever happened because
+`api.main` imports them, and every test runs in the same process as
+`api.main`. `docker-compose.yml`'s `worker`/`beat` services run exactly
+that standalone command, so in a real multi-process deployment every job
+would have sat `queued` forever, never picked up. Fixed by importing both
+task modules at the bottom of `celery_app.py`. Verified for real: started
+a standalone worker, confirmed all 5 tasks now register, created a site
+and ran a job through the real Redis-backed queue (not eager mode) against
+a local test server, and confirmed it reached `succeeded` with the correct
+rows via the real dashboard in a live screenshot.

@@ -44,3 +44,18 @@ celery_app.conf.beat_schedule = {
         "schedule": crontab(minute="*/15"),
     },
 }
+
+# Import the task modules so their @celery_app.task-decorated functions
+# actually register with this app. This matters for a STANDALONE worker
+# process (`celery -A api.celery_app worker`, exactly what docker-compose's
+# worker/beat services run) -- such a process never imports api.main, so
+# without this import it would start up with zero registered tasks and
+# every job would sit "queued" forever, never picked up. api.main ends up
+# importing these too (it needs run_scrape_job directly), which is why this
+# gap never showed up in tests -- they all run in the same process as
+# api.main. Import at the bottom, after `celery_app` is defined above: task
+# modules do `from .celery_app import celery_app` themselves, which is safe
+# here since that name is already set on this (partially initialized)
+# module by the time Python reaches these lines.
+from . import generic_tasks as _generic_tasks  # noqa: E402,F401
+from . import tasks as _tasks  # noqa: E402,F401
