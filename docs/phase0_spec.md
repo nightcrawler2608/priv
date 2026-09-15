@@ -205,3 +205,24 @@ a standalone worker, confirmed all 5 tasks now register, created a site
 and ran a job through the real Redis-backed queue (not eager mode) against
 a local test server, and confirmed it reached `succeeded` with the correct
 rows via the real dashboard in a live screenshot.
+
+Fixed a real bug found by an actual user running `docker-compose up` on
+their own machine with real internet access (this sandbox blocks live
+internet, so this could never have surfaced here): a job against
+books.toscrape.com failed immediately with `404 Not Found:
+https://books.toscrape.com/robots.txt` -- the site simply has no
+`robots.txt` file. The standard crawler convention is that a *missing*
+robots.txt means "no restrictions specified" (most real sites don't
+publish one), not "assume blocked" -- so `scrapers/common/fetch.py`'s
+`fetch_robots_txt()` now catches a 404 specifically (via a new
+`status_code` attribute on `PermanentFetchError`, not string-matching)
+and returns an empty ruleset, which `is_allowed()` correctly reads as
+"everything permitted." Other permanent errors (403, etc.) still raise --
+those mean "you're blocked," a real reason to stop. Also caught and fixed
+a duplication while in there: `scrapers/books_toscrape/scrape.py` had its
+own separate `fetch_robots_txt()` that bypassed the shared
+`scrapers.common.fetch` implementation entirely (and so would have kept
+this exact bug even after the shared fix) -- it now delegates to the
+shared, fixed version. `tests/test_robots_missing.py` is a permanent
+regression test, confirmed (by temporarily reverting the fix) to actually
+fail without it. 86/86 backend tests passing.

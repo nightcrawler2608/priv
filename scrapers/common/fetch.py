@@ -23,7 +23,9 @@ class TransientFetchError(Exception):
 # Requests that failed for a reason that will never change on retry (page
 # genuinely doesn't exist, we're blocked). Retrying is pointless / rude.
 class PermanentFetchError(Exception):
-    pass
+    def __init__(self, message: str, status_code: int | None = None):
+        super().__init__(message)
+        self.status_code = status_code
 
 
 def _fetch_once(url: str, user_agent: str) -> str:
@@ -33,9 +35,9 @@ def _fetch_once(url: str, user_agent: str) -> str:
         raise TransientFetchError(f"network error fetching {url}: {exc}") from exc
 
     if resp.status_code == 404:
-        raise PermanentFetchError(f"404 Not Found: {url}")
+        raise PermanentFetchError(f"404 Not Found: {url}", status_code=404)
     if resp.status_code == 403:
-        raise PermanentFetchError(f"403 Forbidden (blocked?): {url}")
+        raise PermanentFetchError(f"403 Forbidden (blocked?): {url}", status_code=403)
     if resp.status_code == 429 or 500 <= resp.status_code < 600:
         raise TransientFetchError(f"HTTP {resp.status_code} from {url}")
 
@@ -70,4 +72,16 @@ def is_allowed(robots_txt: str, path: str, user_agent: str = DEFAULT_USER_AGENT)
 
 
 def fetch_robots_txt(base_url: str, **kwargs) -> str:
-    return fetch_html(base_url.rstrip("/") + "/robots.txt", **kwargs)
+    """robots.txt content for base_url. A 404 (no robots.txt file at all)
+    is the standard crawler convention for "no restrictions specified" --
+    most sites, including books.toscrape.com, simply don't publish one --
+    so it returns an empty ruleset (is_allowed() then permits everything)
+    instead of raising. Other permanent errors (403, etc.) still raise:
+    those usually mean "you're blocked," not "there happen to be no rules."
+    """
+    try:
+        return fetch_html(base_url.rstrip("/") + "/robots.txt", **kwargs)
+    except PermanentFetchError as exc:
+        if exc.status_code == 404:
+            return ""
+        raise

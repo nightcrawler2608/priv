@@ -21,6 +21,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from ..common.fetch import PermanentFetchError, TransientFetchError, fetch_html, is_allowed
+from ..common.fetch import fetch_robots_txt as _fetch_robots_txt
 from .logging_config import configure_logging
 from .models import Book, clean_and_validate
 from .storage.db import BookORM, get_engine, init_db, upsert_books
@@ -39,7 +40,7 @@ RATING_WORDS = {"Zero": 0, "One": 1, "Two": 2, "Three": 3, "Four": 4, "Five": 5}
 
 
 def fetch_robots_txt(base_url: str = BASE_URL) -> str:
-    return fetch_html(base_url + "robots.txt")
+    return _fetch_robots_txt(base_url)
 
 
 def iter_catalogue_pages(
