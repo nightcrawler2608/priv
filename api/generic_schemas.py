@@ -50,3 +50,20 @@ class PaginatedItems(BaseModel):
     limit: int
     offset: int
     items: list[ItemOut]
+
+
+class DetectSiteRequest(BaseModel):
+    url: str
+
+
+class DetectSiteResponse(BaseModel):
+    name: str
+    base_url: str
+    list_url_template: str
+    item_selector: str
+    key_selector: str | None
+    key_attr: str
+    fields: list[FieldConfigIn]
+    max_pages: int
+    item_count: int  # how many repeated items were found -- a confidence signal for the UI
+    preview: list[dict[str, Any]]  # a few extracted rows, so the user can sanity-check before saving

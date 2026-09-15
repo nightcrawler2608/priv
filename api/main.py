@@ -10,6 +10,7 @@ GET    /jobs/{id}/export           -> CSV download of that job's rows (books_tos
 POST   /sites                      -> save a new site definition (URL + CSS selectors)
 GET    /sites                      -> list saved sites
 GET    /sites/{site_id}            -> one site definition
+POST   /sites/detect                -> "paste a URL, get data": guess item_selector/fields from a live page
 POST   /sites/{site_id}/jobs       -> create+run a scrape job for that site, 202 immediately
 GET    /sites/{site_id}/jobs/{id}/results -> paginated rows that job produced
 GET    /sites/{site_id}/jobs/{id}/export  -> CSV download of that job's rows
@@ -24,6 +25,7 @@ import io
 import json
 import uuid
 from datetime import datetime, timezone
+from urllib.parse import urlparse
 
 import pandas as pd
 from fastapi import FastAPI, HTTPException
@@ -35,10 +37,22 @@ from sqlalchemy.orm import Session
 
 from scrapers.books_toscrape.logging_config import configure_logging
 from scrapers.books_toscrape.storage.db import BookHistoryORM, JobORM, get_engine, init_db
+from scrapers.common.fetch import PermanentFetchError, TransientFetchError, fetch_html
+from scrapers.generic.autodetect import detect_site_structure
 from scrapers.generic.models import SiteDefinition
+from scrapers.generic.parser import parse_items
 from scrapers.generic.storage import ItemHistoryORM, SiteORM  # noqa: F401 -- import registers these tables on Base.metadata
+from scrapers.generic.validate import clean_and_validate_items
 
-from .generic_schemas import FieldConfigIn, ItemOut, PaginatedItems, SiteCreate, SiteOut
+from .generic_schemas import (
+    DetectSiteRequest,
+    DetectSiteResponse,
+    FieldConfigIn,
+    ItemOut,
+    PaginatedItems,
+    SiteCreate,
+    SiteOut,
+)
 from .generic_tasks import run_generic_scrape_job
 from .schemas import BookOut, JobCreate, JobOut, PaginatedBooks
 from .tasks import run_scrape_job
@@ -158,9 +172,13 @@ def create_site(payload: SiteCreate) -> SiteOut:
     site_id = uuid.uuid4().hex
     try:
         # Round-trip through SiteDefinition so the same validation used at
-        # scrape time (unique field names, "{page}" placeholder, etc.)
-        # rejects a bad config immediately instead of at the first job.
-        SiteDefinition(
+        # scrape time (unique field names, single-page max_pages capping,
+        # etc.) applies immediately instead of at the first job. Store the
+        # VALIDATED object's fields below, not the raw payload -- e.g.
+        # max_pages may have been corrected (capped to 1 for a template
+        # with no {page} placeholder), and that correction must actually
+        # reach the database, not just this in-memory check.
+        site_def = SiteDefinition(
             id=site_id, name=payload.name, base_url=payload.base_url,
             list_url_template=payload.list_url_template, item_selector=payload.item_selector,
             key_selector=payload.key_selector, key_attr=payload.key_attr,
@@ -171,11 +189,11 @@ def create_site(payload: SiteCreate) -> SiteOut:
 
     with _session() as session:
         row = SiteORM(
-            id=site_id, name=payload.name, base_url=payload.base_url,
-            list_url_template=payload.list_url_template, item_selector=payload.item_selector,
-            key_selector=payload.key_selector, key_attr=payload.key_attr,
-            fields_json=json.dumps([f.model_dump() for f in payload.fields]),
-            max_pages=payload.max_pages, created_at=datetime.now(timezone.utc),
+            id=site_id, name=site_def.name, base_url=site_def.base_url,
+            list_url_template=site_def.list_url_template, item_selector=site_def.item_selector,
+            key_selector=site_def.key_selector, key_attr=site_def.key_attr,
+            fields_json=json.dumps([f.model_dump() for f in site_def.fields]),
+            max_pages=site_def.max_pages, created_at=datetime.now(timezone.utc),
         )
         session.add(row)
         session.commit()
@@ -188,6 +206,53 @@ def list_sites() -> list[SiteOut]:
     with _session() as session:
         rows = session.scalars(select(SiteORM).order_by(SiteORM.created_at.desc())).all()
         return [_site_orm_to_out(r) for r in rows]
+
+
+@app.post("/sites/detect", response_model=DetectSiteResponse)
+def detect_site(payload: DetectSiteRequest) -> DetectSiteResponse:
+    """"Paste a URL, get data": fetches the page live and guesses
+    item_selector + fields, no CSS knowledge required. Returns a preview
+    of actually-extracted rows so the caller can sanity-check the guess
+    before saving it as a site (POST /sites) -- a heuristic, not magic,
+    so it's meant to be reviewed, not blindly trusted."""
+    try:
+        html = fetch_html(payload.url)
+    except PermanentFetchError as exc:
+        raise HTTPException(status_code=422, detail=f"could not fetch that URL: {exc}") from exc
+    except TransientFetchError as exc:
+        raise HTTPException(status_code=502, detail=f"that site isn't responding right now: {exc}") from exc
+
+    detected = detect_site_structure(html)
+    if detected is None:
+        raise HTTPException(
+            status_code=422,
+            detail="couldn't find a repeated list/grid of items on that page -- "
+                   "try a category or search-results page rather than a single article, "
+                   "or fall back to the manual selector form below",
+        )
+
+    parsed = urlparse(payload.url)
+    base_url = f"{parsed.scheme}://{parsed.netloc}/"
+    fields_out = [FieldConfigIn(name=f.name, selector=f.selector, attr=f.attr, type=f.type, required=False) for f in detected.fields]
+
+    # A real preview, not just the guessed selector names -- built from a
+    # throwaway SiteDefinition run through the actual parser, so what the
+    # user sees here is exactly what saving this config would produce.
+    preview_site = SiteDefinition(
+        id="preview", name="preview", base_url=base_url, list_url_template=payload.url,
+        item_selector=detected.item_selector, key_selector=detected.key_selector,
+        key_attr=detected.key_attr, fields=[f.model_dump() for f in fields_out],
+    )
+    raw_items = parse_items(html, payload.url, preview_site)
+    clean_items, _ = clean_and_validate_items(raw_items, preview_site)
+    preview_rows = [{f.name: item.get(f.name) for f in detected.fields} for item in clean_items[:5]]
+
+    return DetectSiteResponse(
+        name=parsed.netloc, base_url=base_url, list_url_template=payload.url,
+        item_selector=detected.item_selector, key_selector=detected.key_selector,
+        key_attr=detected.key_attr, fields=fields_out, max_pages=1,
+        item_count=detected.item_count, preview=preview_rows,
+    )
 
 
 @app.get("/sites/{site_id}", response_model=SiteOut)

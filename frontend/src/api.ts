@@ -138,3 +138,27 @@ export function getSiteResults(siteId: string, jobId: string, limit: number, off
 export function siteExportUrl(siteId: string, jobId: string): string {
   return `${API_URL}/sites/${siteId}/jobs/${jobId}/export`;
 }
+
+// ---- "Paste a URL, get data": guesses item_selector + fields from a live
+// page instead of requiring the user to know CSS. ----
+
+export interface DetectSiteResponse {
+  name: string;
+  base_url: string;
+  list_url_template: string;
+  item_selector: string;
+  key_selector: string | null;
+  key_attr: string;
+  fields: FieldConfig[];
+  max_pages: number;
+  item_count: number;
+  preview: Record<string, unknown>[];
+}
+
+export function detectSite(url: string): Promise<DetectSiteResponse> {
+  return fetch(`${API_URL}/sites/detect`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ url }),
+  }).then((res) => asJson<DetectSiteResponse>(res));
+}

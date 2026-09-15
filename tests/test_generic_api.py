@@ -60,10 +60,15 @@ def test_create_site_persists_config(client):
     assert "id" in body
 
 
-def test_create_site_rejects_template_without_page_placeholder(client):
-    bad = {**SITE_PAYLOAD, "list_url_template": "https://x.example/products"}
-    resp = client.post("/sites", json=bad)
-    assert resp.status_code == 422
+def test_create_site_without_page_placeholder_is_treated_as_single_page(client):
+    """No {page} in the template -- a plain URL -- is valid: it's just a
+    single-page site, and max_pages is forced to 1 regardless of what was
+    submitted, since refetching the same URL would just re-scrape the
+    same content."""
+    payload = {**SITE_PAYLOAD, "list_url_template": "https://x.example/products", "max_pages": 10}
+    resp = client.post("/sites", json=payload)
+    assert resp.status_code == 201
+    assert resp.json()["max_pages"] == 1
 
 
 def test_create_site_rejects_duplicate_field_names(client):

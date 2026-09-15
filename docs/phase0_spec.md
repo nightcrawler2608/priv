@@ -248,3 +248,38 @@ title -- another reason to fix the root cause rather than rely on
 downstream tolerance. `tests/test_encoding.py` is a permanent regression
 test, confirmed (by temporarily reverting the fix) to reproduce the exact
 `Â£51.77` mojibake without it. 88/88 backend tests passing.
+
+"Paste a URL, get data" — `scrapers/generic/autodetect.py` guesses a
+site's structure from raw HTML with pure heuristics (no AI/LLM call, no
+API key): groups sibling elements by (tag, class list) sharing a parent
+and picks whichever group repeats the most (the classic signature of a
+product grid/article list/search-results page), then within one example
+item guesses fields -- a heading is probably the title, text containing a
+currency symbol is probably a price, the first link is probably the
+item's own page (used as the stable key), the first image is probably a
+thumbnail. `POST /sites/detect` fetches a live URL, runs the heuristic,
+and returns a real preview (rows extracted through the actual parser, not
+just guessed selector names) so the result can be sanity-checked before
+saving — a human-reviewed guess, not a blind auto-save, since heuristics
+get unusual layouts wrong. The frontend's "Custom Sites" tab now leads
+with a single URL input + "Detect" button that pre-fills an editable
+review form from this; the original manual-selector form still exists,
+collapsed behind "Advanced." Also relaxed `SiteDefinition`: the `{page}`
+placeholder in `list_url_template` is no longer mandatory — a plain URL
+with no placeholder is now valid and is simply treated as a single-page
+site (`max_pages` capped to 1), removing friction for the common
+non-paginated case. Fixed a bug caught while wiring this in:
+`POST /sites`'s handler validated the submitted config through
+`SiteDefinition` (which correctly applies that `max_pages` cap) but then
+discarded the validated object and stored the raw, uncapped payload
+values instead — the exact same "validate but don't use the validated
+result" class of bug as the earlier Postgres fixes. Tested against the
+real fixture used since Phase 1 (`tests/test_autodetect.py` proves the
+heuristic finds all 6 books with correct title/price fields and that the
+guessed config produces byte-correct data through the real parser;
+`tests/test_detect_api.py` proves the API round-trips a detected config
+straight into a saved, runnable site) and additionally verified with a
+real, non-mocked browser run against a local test server: pasted a URL,
+clicked Detect, saved the result with zero manual edits, ran it, and got
+all 6 correct rows. 96/96 backend tests passing, 13/13 frontend tests
+passing.

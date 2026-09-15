@@ -2,6 +2,7 @@ import { useState } from "react";
 import { useMutation, useQueryClient } from "@tanstack/react-query";
 import { createSiteJob } from "../api";
 import { useJob, useSites } from "../hooks";
+import { QuickAddSite } from "./QuickAddSite";
 import { SiteForm } from "./SiteForm";
 import { SitesList } from "./SitesList";
 import { GenericResultsTable } from "./GenericResultsTable";
@@ -9,7 +10,7 @@ import { JobStatusBadge } from "./JobStatusBadge";
 import { JobRowsChart } from "./JobRowsChart";
 
 export function SitesDashboard() {
-  const [showForm, setShowForm] = useState(false);
+  const [showManualForm, setShowManualForm] = useState(false);
   const [selectedSiteId, setSelectedSiteId] = useState<string | null>(null);
   const [jobId, setJobId] = useState<string | null>(null);
 
@@ -24,30 +25,29 @@ export function SitesDashboard() {
 
   const selectedSite = sites?.find((s) => s.id === selectedSiteId) ?? null;
 
+  function handleSiteCreated(siteId: string) {
+    setSelectedSiteId(siteId);
+    setJobId(null);
+    queryClient.invalidateQueries({ queryKey: ["sites"] });
+  }
+
   return (
     <div className="flex flex-col gap-4">
-      <div className="flex items-center justify-between">
-        <p className="text-sm text-slate-500">
-          Any site, described by CSS selectors instead of hardcoded code — add one below.
-        </p>
-        <button
-          onClick={() => setShowForm((v) => !v)}
-          className="rounded-md border border-slate-300 px-3 py-1 text-sm font-medium text-slate-700 hover:bg-slate-50"
-        >
-          {showForm ? "Hide form" : "+ Add site"}
-        </button>
-      </div>
+      <QuickAddSite onCreated={handleSiteCreated} />
 
-      {showForm && (
-        <SiteForm
-          onCreated={(siteId) => {
-            setShowForm(false);
-            setSelectedSiteId(siteId);
-            setJobId(null);
-            queryClient.invalidateQueries({ queryKey: ["sites"] });
-          }}
-        />
-      )}
+      <div>
+        <button
+          onClick={() => setShowManualForm((v) => !v)}
+          className="text-xs font-medium text-slate-500 hover:text-slate-700 hover:underline"
+        >
+          {showManualForm ? "Hide manual setup" : "Advanced: enter CSS selectors manually"}
+        </button>
+        {showManualForm && (
+          <div className="mt-2">
+            <SiteForm onCreated={handleSiteCreated} />
+          </div>
+        )}
+      </div>
 
       <section className="grid grid-cols-1 gap-6 md:grid-cols-[240px_1fr]">
         <div>

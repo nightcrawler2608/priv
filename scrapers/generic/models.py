@@ -47,19 +47,25 @@ class SiteDefinition(BaseModel):
     id: str
     name: str
     base_url: str
-    list_url_template: str  # must contain "{page}", e.g. "https://example.com/products?page={page}"
+    # A plain URL (single page, e.g. "https://example.com/products") works
+    # as-is -- max_pages is effectively 1 in that case, since re-fetching
+    # the same URL just re-scrapes identical content. Include the literal
+    # placeholder "{page}" (e.g. "https://example.com/products?page={page}")
+    # only for a site with real pagination you want to walk through.
+    list_url_template: str
     item_selector: str  # CSS selector matching each repeated item/row on the list page
     key_selector: str | None = None  # CSS selector for a link whose href becomes the item's stable id
     key_attr: str = "href"
     fields: list[FieldConfig] = Field(min_length=1)
     max_pages: int = Field(ge=1, le=200, default=10)
 
-    @field_validator("list_url_template")
-    @classmethod
-    def must_contain_page_placeholder(cls, v: str) -> str:
-        if "{page}" not in v:
-            raise ValueError("list_url_template must contain the literal placeholder '{page}'")
-        return v
+    @model_validator(mode="after")
+    def single_page_when_no_placeholder(self) -> "SiteDefinition":
+        # No {page} in the template means every "page" is the same URL --
+        # cap max_pages at 1 so we don't re-fetch identical content.
+        if "{page}" not in self.list_url_template and self.max_pages > 1:
+            self.max_pages = 1
+        return self
 
     @model_validator(mode="after")
     def field_names_unique(self) -> "SiteDefinition":
