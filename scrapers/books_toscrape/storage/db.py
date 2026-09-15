@@ -55,9 +55,13 @@ class JobORM(Base):
     quality_report: Mapped[str | None] = mapped_column(String, nullable=True)  # JSON string, see quality.build_quality_report
     # "config-driven sites" feature: set for a job run against a generic
     # SiteDefinition (scrapers/generic), None for the books_toscrape jobs
-    # from Phases 1-7. FK resolved by table name -- scrapers.generic.storage
-    # must be imported before init_db() runs so the `sites` table exists.
-    site_id: Mapped[str | None] = mapped_column(String, ForeignKey("sites.id"), nullable=True)
+    # from Phases 1-7. Deliberately NOT a ForeignKey: this core module must
+    # stay usable (and its tables creatable) without importing the optional
+    # scrapers.generic package -- a real DB-level FK here would mean
+    # init_db()/any flush breaks whenever generic.storage (which owns the
+    # `sites` table) hasn't been imported yet. Referential integrity for
+    # this column is enforced at the application level instead.
+    site_id: Mapped[str | None] = mapped_column(String, nullable=True)
 
 
 class BookORM(Base):
@@ -148,6 +152,13 @@ def upsert_books(
                 availability=rec.availability, row_hash=h,
                 first_seen_at=scraped_at, last_seen_at=scraped_at, last_changed_at=scraped_at,
             ))
+            # Flush the parent row before adding the history row that
+            # references it. Without an ORM relationship(), SQLAlchemy's
+            # unit-of-work doesn't guarantee insert order between these two
+            # mappers -- SQLite let a wrong order through silently (it
+            # doesn't enforce foreign keys by default); Postgres correctly
+            # rejects it as a real FK violation.
+            session.flush()
             session.add(BookHistoryORM(
                 url=rec.url, job_id=job_id, title=rec.title, price=rec.price, rating=rec.rating,
                 availability=rec.availability, row_hash=h, recorded_at=scraped_at,

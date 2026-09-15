@@ -143,3 +143,31 @@ with a real, non-mocked HTTP run (backend actually scraping a local test
 server via retry/robots.txt/pagination logic, driven end-to-end through the
 real browser UI) — 79/79 backend tests passing, 11/11 frontend tests
 passing.
+
+Switched to Postgres (verified against a real local PostgreSQL 16 instance,
+not just asserted) — found and fixed two real bugs SQLite's default
+behavior had been hiding:
+1. `upsert_books()` added a new `BookORM` row and its matching
+   `BookHistoryORM` row in the same flush with no ORM `relationship()`
+   between them, so SQLAlchemy had no guaranteed insert order. SQLite let
+   the wrong order through silently (it doesn't enforce foreign keys by
+   default); Postgres correctly rejected it as a real FK violation. Fixed
+   with an explicit `session.flush()` between the two inserts
+   (`storage/db.py`). `upsert_items()` in the generic engine was checked
+   against the same real Postgres instance and confirmed NOT to have this
+   bug (`ItemHistoryORM` has no FK back to `ItemORM`) — verified rather
+   than assumed.
+2. `JobORM.site_id` had been declared as a hard foreign key into the
+   `sites` table, owned by the optional `scrapers.generic` package —
+   backwards dependency direction that broke `init_db()`/any flush for
+   anyone using only the core books_toscrape pipeline without importing
+   `scrapers.generic`. Changed to a plain (non-FK) nullable column;
+   referential integrity for it is enforced at the application level.
+`tests/test_fk_enforcement.py` is a permanent regression test for bug #1 —
+it doesn't need a real Postgres server, just SQLite with
+`PRAGMA foreign_keys=ON` turned on for one throwaway engine, which is
+enough to catch the same ordering bug in the normal (offline) test suite
+going forward. `docker-compose.yml` already pointed every service at
+Postgres by default (`postgresql+psycopg2://scraper:scraper@postgres:5432/scraper`);
+that config is now proven correct end-to-end, not just schema-valid.
+80/80 backend tests passing.
