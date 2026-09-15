@@ -1,10 +1,59 @@
 """
-Phase 6: quality gates. A scrape can "succeed" (no exception) while still
-being wrong -- a broken CSS selector doesn't crash, it just silently
-extracts nothing or garbage. These checks catch that class of failure,
-which retries and error handling from Phase 2/4 can never see.
+Phase 6+7: quality gates and per-run data quality reports. A scrape can
+"succeed" (no exception) while still being wrong -- a broken CSS selector
+doesn't crash, it just silently extracts nothing or garbage. These checks
+catch that class of failure, which retries and error handling from
+Phase 2/4 can never see.
 """
 from __future__ import annotations
+
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from .models import Book, BookRecord
+
+FIELDS = ("title", "price", "rating", "availability")
+
+
+def _is_blank(value: object) -> bool:
+    if value is None:
+        return True
+    if isinstance(value, str):
+        return value.strip() == ""
+    return False
+
+
+def build_quality_report(
+    raw_books: "list[Book]",
+    clean_books: "list[BookRecord]",
+    current_row_count: int,
+    previous_row_count: int | None,
+) -> dict:
+    """Phase 7: a per-run data quality report -- null/blank percentage per
+    field, reject rate, and row count vs. the previous run. Meant to be
+    logged (structured, via loguru) and/or surfaced on a dashboard, not
+    just acted on like the pass/fail warnings from check_job_quality()."""
+    total_parsed = len(raw_books)
+    rejected = total_parsed - len(clean_books)
+
+    null_pct = {}
+    for field in FIELDS:
+        blank = sum(1 for b in raw_books if _is_blank(getattr(b, field)))
+        null_pct[field] = round(100 * blank / total_parsed, 1) if total_parsed else 0.0
+
+    row_drop_pct = None
+    if previous_row_count:
+        row_drop_pct = round(100 * (previous_row_count - current_row_count) / previous_row_count, 1)
+
+    return {
+        "total_parsed": total_parsed,
+        "rejected": rejected,
+        "reject_ratio_pct": round(100 * rejected / total_parsed, 1) if total_parsed else 0.0,
+        "current_row_count": current_row_count,
+        "previous_row_count": previous_row_count,
+        "row_drop_pct": row_drop_pct,
+        "null_pct": null_pct,
+    }
 
 
 def check_job_quality(

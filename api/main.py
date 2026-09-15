@@ -23,11 +23,13 @@ from fastapi.responses import StreamingResponse
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
+from scrapers.books_toscrape.logging_config import configure_logging
 from scrapers.books_toscrape.storage.db import BookHistoryORM, JobORM, get_engine, init_db
 
 from .schemas import BookOut, JobCreate, JobOut, PaginatedBooks
 from .tasks import run_scrape_job
 
+configure_logging()
 app = FastAPI(title="Data Scraping Tool API")
 
 # Frontend (Vite dev server) runs on a different origin/port than the API,

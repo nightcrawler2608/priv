@@ -8,12 +8,10 @@ BookRecord = validated row. Only BookRecords are allowed into storage.
 from __future__ import annotations
 
 import hashlib
-import logging
 from dataclasses import dataclass
 
+from loguru import logger
 from pydantic import BaseModel, ConfigDict, ValidationError, field_validator
-
-logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -90,5 +88,5 @@ def clean_and_validate(raw_books: list[Book]) -> list[BookRecord]:
                 rating=b.rating, availability=b.availability,
             ))
         except ValidationError as exc:
-            logger.warning("rejected row (url=%s): %s", getattr(b, "url", "?"), exc)
+            logger.warning("rejected row (url={}): {}", getattr(b, "url", "?"), exc)
     return clean

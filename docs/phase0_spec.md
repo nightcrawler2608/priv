@@ -93,3 +93,21 @@ entirely, runs synchronously) with the pipeline's network calls faked via
 the Phase 1 fixture, `requests.post` mocked for alert delivery
 (`tests/test_config.py`, `tests/test_quality.py`, `tests/test_alerts.py`,
 `tests/test_automation.py`) — 50/50 tests passing.
+Phase 7: monitoring, deployment, CI — `logging_config.py` wires structured
+logging (loguru: human-readable to stdout, JSON lines to a rotating file)
+and opt-in Sentry error tracking (`SENTRY_DSN`) into every entry point
+(FastAPI startup, `scrape.py`'s CLI `main()`, Celery tasks); exceptions in
+`run_scrape_job` are both logged with a traceback and reported to Sentry
+when configured. `quality.build_quality_report()` adds a per-run report
+(null/blank % per field, reject ratio, row count vs. previous run) stored
+as JSON on each job (`JobORM.quality_report`) alongside the existing
+pass/fail warnings. `Dockerfile` (backend, shared by api/worker/beat via
+command override) + `frontend/Dockerfile` + `docker-compose.yml` (Postgres,
+Redis, api, worker, beat, frontend, with healthchecks) — `docker compose
+config` validates the file, but a full `docker compose up` couldn't be run
+in this sandbox (Docker Hub is blocked by its network policy), so the
+compose stack is unverified end-to-end; try it in an unrestricted
+environment. `.github/workflows/ci.yml` runs `pytest` and `tsc`+`vitest`
+on every push/PR. New tests: `tests/test_quality_report.py`,
+`tests/test_logging_config.py` — 57/57 backend tests passing, 7/7 frontend
+tests passing.

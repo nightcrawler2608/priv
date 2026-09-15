@@ -19,9 +19,11 @@ from urllib.robotparser import RobotFileParser
 import pandas as pd
 import requests
 from bs4 import BeautifulSoup
+from loguru import logger
 from sqlalchemy.orm import Session
 from tenacity import Retrying, retry_if_exception_type, stop_after_attempt, wait_exponential
 
+from .logging_config import configure_logging
 from .models import Book, clean_and_validate
 from .storage.db import get_engine, init_db, upsert_books
 from .storage.raw_snapshots import save_raw_snapshot
@@ -143,9 +145,10 @@ def save_csv(books: list[Book], out_path: Path) -> None:
 
 
 def main() -> None:
+    configure_logging()
     robots_txt = fetch_robots_txt()
     if not is_allowed(robots_txt, "/catalogue/page-1.html"):
-        print("robots.txt disallows the catalogue path — stopping.")
+        logger.warning("robots.txt disallows the catalogue path — stopping.")
         return
 
     engine = get_engine()
@@ -156,7 +159,7 @@ def main() -> None:
         page_url = f"{BASE_URL}catalogue/page-{page_num}.html"
         save_raw_snapshot(html, page_num, Path("data/raw_html"))
         page_books = parse_books(html, page_url=page_url)
-        print(f"page {page_num}: {len(page_books)} rows")
+        logger.info("page {}: {} rows", page_num, len(page_books))
         raw_books.extend(page_books)
 
     clean_books = clean_and_validate(raw_books)
@@ -165,16 +168,15 @@ def main() -> None:
     with Session(engine) as session:
         stats = upsert_books(session, clean_books)
 
-    print(
-        f"validated {len(clean_books)}/{len(raw_books)} rows "
-        f"({rejected} rejected) — new={stats['new']} changed={stats['changed']} "
-        f"unchanged={stats['unchanged']}"
+    logger.info(
+        "validated {}/{} rows ({} rejected) — new={} changed={} unchanged={}",
+        len(clean_books), len(raw_books), rejected, stats["new"], stats["changed"], stats["unchanged"],
     )
 
     out_path = Path("data/books_catalogue.csv")
     save_csv([Book(url=r.url, title=r.title, price=r.price, rating=r.rating,
                     availability=r.availability) for r in clean_books], out_path)
-    print(f"Saved {len(clean_books)} current rows to {out_path}")
+    logger.info("Saved {} current rows to {}", len(clean_books), out_path)
 
 
 if __name__ == "__main__":

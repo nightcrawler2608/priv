@@ -52,6 +52,7 @@ class JobORM(Base):
     triggered_by: Mapped[str] = mapped_column(String, nullable=False, default="manual")  # manual|scheduled|retry
     quality_warnings: Mapped[str | None] = mapped_column(String, nullable=True)  # "; "-joined, empty/None if healthy
     permanently_failed: Mapped[bool] = mapped_column(default=False)  # retries exhausted, already alerted -- don't re-alert
+    quality_report: Mapped[str | None] = mapped_column(String, nullable=True)  # JSON string, see quality.build_quality_report
 
 
 class BookORM(Base):

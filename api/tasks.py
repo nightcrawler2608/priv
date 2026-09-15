@@ -12,17 +12,21 @@ retry_failed_jobs      finds recently failed jobs under the configured
 """
 from __future__ import annotations
 
+import json
+import os
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 
+from loguru import logger
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from scrapers.books_toscrape.alerts import send_alert
 from scrapers.books_toscrape.config import DEFAULT_CONFIG_PATH, load_config
+from scrapers.books_toscrape.logging_config import configure_logging
 from scrapers.books_toscrape.models import Book, clean_and_validate
-from scrapers.books_toscrape.quality import check_job_quality
+from scrapers.books_toscrape.quality import build_quality_report, check_job_quality
 from scrapers.books_toscrape.scrape import (
     BASE_URL,
     fetch_robots_txt,
@@ -49,17 +53,20 @@ def run_scrape_job(
     max_reject_ratio: float = 0.5,
     max_row_drop_ratio: float = 0.4,
 ) -> None:
+    configure_logging()
     engine = get_engine()
     init_db(engine)
 
     with Session(engine) as session:
         job = session.get(JobORM, job_id)
         if job is None:
+            logger.warning("run_scrape_job called for unknown job_id={}", job_id)
             return  # job row vanished/never existed -- nothing to run against
 
         job.status = "running"
         job.started_at = datetime.now(timezone.utc)
         session.commit()
+        logger.info("job {} started (max_pages={}, triggered_by={})", job_id, max_pages, job.triggered_by)
 
         try:
             robots_txt = fetch_robots_txt()
@@ -86,6 +93,15 @@ def run_scrape_job(
 
             current_row_count = stats["new"] + stats["changed"] + stats["unchanged"]
             baseline = previous_successful_row_count(session, job_id)
+
+            report = build_quality_report(raw_books, clean_books, current_row_count, baseline)
+            job.quality_report = json.dumps(report)
+            session.commit()
+            logger.bind(job_id=job_id, quality_report=report).info(
+                "job {} finished: {} new, {} changed, {} unchanged, {} rejected",
+                job_id, stats["new"], stats["changed"], stats["unchanged"], rejected,
+            )
+
             warnings = check_job_quality(
                 current_row_count=current_row_count,
                 previous_row_count=baseline,
@@ -97,6 +113,7 @@ def run_scrape_job(
             if warnings:
                 job.quality_warnings = "; ".join(warnings)
                 session.commit()
+                logger.warning("job {} quality warnings: {}", job_id, warnings)
                 send_alert(
                     f"Data quality warning on job {job_id} ({job.triggered_by}): " + "; ".join(warnings),
                     details={"job_id": job_id, "warnings": warnings},
@@ -109,6 +126,11 @@ def run_scrape_job(
             job.error_message = str(exc)
             job.finished_at = datetime.now(timezone.utc)
             session.commit()
+            logger.exception("job {} failed", job_id)
+
+            if os.environ.get("SENTRY_DSN"):
+                import sentry_sdk
+                sentry_sdk.capture_exception(exc)
             # No alert here -- retry_failed_jobs is the only place that knows
             # whether this job's retry budget is exhausted; alerting here
             # would fire on every transient failure, not just permanent ones.
