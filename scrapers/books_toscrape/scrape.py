@@ -1,24 +1,40 @@
 """
-Phase 1 scraper for books.toscrape.com.
+Phase 1+2 scraper for books.toscrape.com.
 
-Pipeline: fetch one catalogue page -> parse book rows -> save to CSV.
+Pipeline: check robots.txt -> paginate catalogue pages (retrying on transient
+errors, rate-limited between requests) -> parse each page -> save to CSV.
 Run directly:  python -m scrapers.books_toscrape.scrape
 """
 from __future__ import annotations
 
 import sys
+import time
 from dataclasses import dataclass, asdict
 from pathlib import Path
+from urllib.robotparser import RobotFileParser
 
 import pandas as pd
 import requests
 from bs4 import BeautifulSoup
+from tenacity import Retrying, retry_if_exception_type, stop_after_attempt, wait_exponential
 
 BASE_URL = "https://books.toscrape.com/"
 CATALOGUE_URL = BASE_URL + "catalogue/page-1.html"
+ROBOTS_URL = BASE_URL + "robots.txt"
 USER_AGENT = "data-scraping-tool-tutorial/0.1 (+https://github.com/; learning project)"
 
 RATING_WORDS = {"Zero": 0, "One": 1, "Two": 2, "Three": 3, "Four": 4, "Five": 5}
+
+# Requests that failed for a reason worth retrying (network hiccup, server
+# overloaded, rate-limited). The caller should back off and try again.
+class TransientFetchError(Exception):
+    pass
+
+
+# Requests that failed for a reason that will never change on retry (page
+# genuinely doesn't exist, we're blocked). Retrying is pointless / rude.
+class PermanentFetchError(Exception):
+    pass
 
 
 @dataclass
@@ -29,11 +45,65 @@ class Book:
     availability: str
 
 
-def fetch_html(url: str = CATALOGUE_URL) -> str:
-    """Download one page's raw HTML. Network call — not used in tests."""
-    resp = requests.get(url, headers={"User-Agent": USER_AGENT}, timeout=10)
+def _fetch_once(url: str) -> str:
+    try:
+        resp = requests.get(url, headers={"User-Agent": USER_AGENT}, timeout=10)
+    except (requests.exceptions.Timeout, requests.exceptions.ConnectionError) as exc:
+        raise TransientFetchError(f"network error fetching {url}: {exc}") from exc
+
+    if resp.status_code == 404:
+        raise PermanentFetchError(f"404 Not Found: {url}")
+    if resp.status_code == 403:
+        raise PermanentFetchError(f"403 Forbidden (blocked?): {url}")
+    if resp.status_code == 429 or 500 <= resp.status_code < 600:
+        raise TransientFetchError(f"HTTP {resp.status_code} from {url}")
+
     resp.raise_for_status()
     return resp.text
+
+
+def fetch_html(url: str = CATALOGUE_URL, *, max_attempts: int = 4, base_delay: float = 1.0) -> str:
+    """Download one page's raw HTML, retrying transient failures with
+    exponential backoff. Permanent failures (404/403) raise immediately,
+    with no retry."""
+    retryer = Retrying(
+        stop=stop_after_attempt(max_attempts),
+        wait=wait_exponential(multiplier=base_delay, min=base_delay, max=base_delay * 8),
+        retry=retry_if_exception_type(TransientFetchError),
+        reraise=True,
+    )
+    return retryer(_fetch_once, url)
+
+
+def is_allowed(robots_txt: str, path: str, user_agent: str = USER_AGENT) -> bool:
+    """Pure function: given robots.txt content, is this path allowed?"""
+    rp = RobotFileParser()
+    rp.parse(robots_txt.splitlines())
+    return rp.can_fetch(user_agent, path)
+
+
+def fetch_robots_txt(base_url: str = BASE_URL) -> str:
+    return fetch_html(base_url + "robots.txt")
+
+
+def iter_catalogue_pages(
+    max_pages: int = 50,
+    delay_seconds: float = 1.0,
+    max_attempts: int = 4,
+    base_delay: float = 1.0,
+):
+    """Yield (page_number, html) for each catalogue page, stopping cleanly
+    (not erroring) once pagination runs off the end (404). Sleeps
+    delay_seconds between requests so we don't hammer the site."""
+    for page_num in range(1, max_pages + 1):
+        url = f"{BASE_URL}catalogue/page-{page_num}.html"
+        try:
+            html = fetch_html(url, max_attempts=max_attempts, base_delay=base_delay)
+        except PermanentFetchError:
+            break
+        yield page_num, html
+        if page_num < max_pages:
+            time.sleep(delay_seconds)
 
 
 def parse_books(html: str) -> list[Book]:
@@ -67,11 +137,20 @@ def save_csv(books: list[Book], out_path: Path) -> None:
 
 
 def main() -> None:
-    html = fetch_html()
-    books = parse_books(html)
-    out_path = Path("data/books_page1.csv")
-    save_csv(books, out_path)
-    print(f"Saved {len(books)} rows to {out_path}")
+    robots_txt = fetch_robots_txt()
+    if not is_allowed(robots_txt, "/catalogue/page-1.html"):
+        print("robots.txt disallows the catalogue path — stopping.")
+        return
+
+    all_books: list[Book] = []
+    for page_num, html in iter_catalogue_pages(delay_seconds=1.0):
+        page_books = parse_books(html)
+        print(f"page {page_num}: {len(page_books)} rows")
+        all_books.extend(page_books)
+
+    out_path = Path("data/books_catalogue.csv")
+    save_csv(all_books, out_path)
+    print(f"Saved {len(all_books)} rows total to {out_path}")
 
 
 if __name__ == "__main__":

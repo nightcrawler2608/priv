@@ -34,3 +34,9 @@ API if one exists) must be repeated before scraping it.
 Phase 0: done (this file).
 Phase 1: single-site, single-script scraper → CSV, tested against a saved
 HTML fixture (see `tests/fixtures/books_page1.html`).
+Phase 2: robust fetching — retries with exponential backoff on transient
+errors (timeout/connection/5xx/429), fail-fast on permanent errors (404/403),
+runtime `robots.txt` check, rate-limited pagination across catalogue pages,
+optional Playwright path documented for JS-rendered sites. All tested offline
+by mocking HTTP responses (`tests/test_fetch_robustness.py`), no live network
+calls in the test suite.
