@@ -23,6 +23,46 @@ def _is_blank(value: object) -> bool:
     return False
 
 
+class QualityAccumulator:
+    """Streaming version of build_quality_report(): running totals updated
+    one page/batch at a time instead of requiring every parsed row to sit
+    in memory simultaneously. This is what makes the pagination-batched
+    pipeline (api/tasks.py) memory-bounded regardless of how many pages a
+    site has -- each page's rows get folded into these counters and then
+    discarded, not accumulated into one ever-growing list."""
+
+    def __init__(self) -> None:
+        self.total_parsed = 0
+        self.rejected = 0
+        self._null_counts = {field: 0 for field in FIELDS}
+
+    def add_batch(self, raw_batch: "list[Book]", clean_batch: "list[BookRecord]") -> None:
+        self.total_parsed += len(raw_batch)
+        self.rejected += len(raw_batch) - len(clean_batch)
+        for field in FIELDS:
+            self._null_counts[field] += sum(1 for b in raw_batch if _is_blank(getattr(b, field)))
+
+    def build_report(self, current_row_count: int, previous_row_count: int | None) -> dict:
+        null_pct = {
+            field: round(100 * count / self.total_parsed, 1) if self.total_parsed else 0.0
+            for field, count in self._null_counts.items()
+        }
+
+        row_drop_pct = None
+        if previous_row_count:
+            row_drop_pct = round(100 * (previous_row_count - current_row_count) / previous_row_count, 1)
+
+        return {
+            "total_parsed": self.total_parsed,
+            "rejected": self.rejected,
+            "reject_ratio_pct": round(100 * self.rejected / self.total_parsed, 1) if self.total_parsed else 0.0,
+            "current_row_count": current_row_count,
+            "previous_row_count": previous_row_count,
+            "row_drop_pct": row_drop_pct,
+            "null_pct": null_pct,
+        }
+
+
 def build_quality_report(
     raw_books: "list[Book]",
     clean_books: "list[BookRecord]",
@@ -32,28 +72,14 @@ def build_quality_report(
     """Phase 7: a per-run data quality report -- null/blank percentage per
     field, reject rate, and row count vs. the previous run. Meant to be
     logged (structured, via loguru) and/or surfaced on a dashboard, not
-    just acted on like the pass/fail warnings from check_job_quality()."""
-    total_parsed = len(raw_books)
-    rejected = total_parsed - len(clean_books)
+    just acted on like the pass/fail warnings from check_job_quality().
 
-    null_pct = {}
-    for field in FIELDS:
-        blank = sum(1 for b in raw_books if _is_blank(getattr(b, field)))
-        null_pct[field] = round(100 * blank / total_parsed, 1) if total_parsed else 0.0
-
-    row_drop_pct = None
-    if previous_row_count:
-        row_drop_pct = round(100 * (previous_row_count - current_row_count) / previous_row_count, 1)
-
-    return {
-        "total_parsed": total_parsed,
-        "rejected": rejected,
-        "reject_ratio_pct": round(100 * rejected / total_parsed, 1) if total_parsed else 0.0,
-        "current_row_count": current_row_count,
-        "previous_row_count": previous_row_count,
-        "row_drop_pct": row_drop_pct,
-        "null_pct": null_pct,
-    }
+    Convenience wrapper around QualityAccumulator for callers that already
+    have every row in memory at once (e.g. tests); the pipeline itself
+    uses QualityAccumulator directly so it never needs to."""
+    accumulator = QualityAccumulator()
+    accumulator.add_batch(raw_books, clean_books)
+    return accumulator.build_report(current_row_count, previous_row_count)
 
 
 def check_job_quality(

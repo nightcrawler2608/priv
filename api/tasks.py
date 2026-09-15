@@ -25,8 +25,8 @@ from sqlalchemy.orm import Session
 from scrapers.books_toscrape.alerts import send_alert
 from scrapers.books_toscrape.config import DEFAULT_CONFIG_PATH, load_config
 from scrapers.books_toscrape.logging_config import configure_logging
-from scrapers.books_toscrape.models import Book, clean_and_validate
-from scrapers.books_toscrape.quality import build_quality_report, check_job_quality
+from scrapers.books_toscrape.models import clean_and_validate
+from scrapers.books_toscrape.quality import QualityAccumulator, check_job_quality
 from scrapers.books_toscrape.scrape import (
     BASE_URL,
     fetch_robots_txt,
@@ -73,40 +73,54 @@ def run_scrape_job(
             if not is_allowed(robots_txt, "/catalogue/page-1.html"):
                 raise RuntimeError("robots.txt disallows the catalogue path")
 
-            raw_books: list[Book] = []
+            # Process and save one page at a time instead of accumulating
+            # every row in memory before storing anything: bounds memory
+            # to roughly one page's worth of rows regardless of site size,
+            # and means a crash partway through still leaves everything
+            # scraped so far safely committed to the database.
+            accumulator = QualityAccumulator()
+            totals = {"new": 0, "changed": 0, "unchanged": 0}
+
             for page_num, html in iter_catalogue_pages(max_pages=max_pages, delay_seconds=1.0):
                 page_url = f"{BASE_URL}catalogue/page-{page_num}.html"
                 save_raw_snapshot(html, page_num, Path("data/raw_html"))
-                raw_books.extend(parse_books(html, page_url=page_url))
 
-            clean_books = clean_and_validate(raw_books)
-            rejected = len(raw_books) - len(clean_books)
-            stats = upsert_books(session, clean_books, job_id=job_id)
+                raw_page = parse_books(html, page_url=page_url)
+                clean_page = clean_and_validate(raw_page)
+                accumulator.add_batch(raw_page, clean_page)
+
+                page_stats = upsert_books(session, clean_page, job_id=job_id)  # commits this page now
+                for key in totals:
+                    totals[key] += page_stats[key]
+                logger.debug(
+                    "page {}: {} rows ({} rejected)",
+                    page_num, len(clean_page), len(raw_page) - len(clean_page),
+                )
 
             job.status = "succeeded"
-            job.rows_new = stats["new"]
-            job.rows_changed = stats["changed"]
-            job.rows_unchanged = stats["unchanged"]
-            job.rows_rejected = rejected
+            job.rows_new = totals["new"]
+            job.rows_changed = totals["changed"]
+            job.rows_unchanged = totals["unchanged"]
+            job.rows_rejected = accumulator.rejected
             job.finished_at = datetime.now(timezone.utc)
             session.commit()
 
-            current_row_count = stats["new"] + stats["changed"] + stats["unchanged"]
+            current_row_count = totals["new"] + totals["changed"] + totals["unchanged"]
             baseline = previous_successful_row_count(session, job_id)
 
-            report = build_quality_report(raw_books, clean_books, current_row_count, baseline)
+            report = accumulator.build_report(current_row_count, baseline)
             job.quality_report = json.dumps(report)
             session.commit()
             logger.bind(job_id=job_id, quality_report=report).info(
                 "job {} finished: {} new, {} changed, {} unchanged, {} rejected",
-                job_id, stats["new"], stats["changed"], stats["unchanged"], rejected,
+                job_id, totals["new"], totals["changed"], totals["unchanged"], accumulator.rejected,
             )
 
             warnings = check_job_quality(
                 current_row_count=current_row_count,
                 previous_row_count=baseline,
-                rejected=rejected,
-                total_parsed=len(raw_books),
+                rejected=accumulator.rejected,
+                total_parsed=accumulator.total_parsed,
                 max_reject_ratio=max_reject_ratio,
                 max_row_drop_ratio=max_row_drop_ratio,
             )

@@ -171,3 +171,21 @@ going forward. `docker-compose.yml` already pointed every service at
 Postgres by default (`postgresql+psycopg2://scraper:scraper@postgres:5432/scraper`);
 that config is now proven correct end-to-end, not just schema-valid.
 80/80 backend tests passing.
+
+Pagination batching — both engines (`api/tasks.py`, `api/generic_tasks.py`)
+and the Phase 1 CLI (`scrape.py`'s `main()`) now validate and store one
+page at a time instead of fetching the whole site into memory before
+saving anything: memory use is bounded to roughly one page's rows
+regardless of site size, and each page is committed to the database
+before the next page is even fetched, so a crash partway through a scrape
+does not lose rows already saved (verified directly, against both SQLite
+and real Postgres, by crashing a job after page 1 and confirming page 1's
+rows survive even though the job correctly reports `failed`). The per-run
+data quality report (null %, reject ratio) moved from a single
+all-rows-at-once calculation to `QualityAccumulator`/`GenericQualityAccumulator`
+running totals updated per page — proven to produce byte-identical output
+to the old one-shot calculation (`tests/test_batching.py`). The CLI's CSV
+export now queries current state from the database after the scrape
+instead of building the file from an in-memory row list, which is both
+more memory-bounded and more correct (reflects every book ever seen, not
+just this run's). 83/83 backend tests passing.

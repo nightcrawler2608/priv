@@ -11,19 +11,19 @@ from __future__ import annotations
 
 import sys
 import time
-from dataclasses import asdict
 from pathlib import Path
 from urllib.parse import urljoin
 
 import pandas as pd
 from bs4 import BeautifulSoup
 from loguru import logger
+from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from ..common.fetch import PermanentFetchError, TransientFetchError, fetch_html, is_allowed
 from .logging_config import configure_logging
 from .models import Book, clean_and_validate
-from .storage.db import get_engine, init_db, upsert_books
+from .storage.db import BookORM, get_engine, init_db, upsert_books
 from .storage.raw_snapshots import save_raw_snapshot
 
 BASE_URL = "https://books.toscrape.com/"
@@ -92,10 +92,19 @@ def parse_books(html: str, page_url: str = CATALOGUE_URL) -> list[Book]:
     return books
 
 
-def save_csv(books: list[Book], out_path: Path) -> None:
-    df = pd.DataFrame([asdict(b) for b in books])
+def export_books_csv(session: Session, out_path: Path) -> int:
+    """Export the current `books` table state to CSV, queried straight
+    from storage rather than built up from rows held in memory during the
+    scrape -- reflects the true current state (all books ever seen, not
+    just this run's), and never needs the whole site's rows in memory."""
+    rows = session.scalars(select(BookORM).order_by(BookORM.url)).all()
+    df = pd.DataFrame([{
+        "url": r.url, "title": r.title, "price": r.price,
+        "rating": r.rating, "availability": r.availability,
+    } for r in rows])
     out_path.parent.mkdir(parents=True, exist_ok=True)
     df.to_csv(out_path, index=False)
+    return len(rows)
 
 
 def main() -> None:
@@ -108,29 +117,42 @@ def main() -> None:
     engine = get_engine()
     init_db(engine)
 
-    raw_books: list[Book] = []
-    for page_num, html in iter_catalogue_pages(delay_seconds=1.0):
-        page_url = f"{BASE_URL}catalogue/page-{page_num}.html"
-        save_raw_snapshot(html, page_num, Path("data/raw_html"))
-        page_books = parse_books(html, page_url=page_url)
-        logger.info("page {}: {} rows", page_num, len(page_books))
-        raw_books.extend(page_books)
-
-    clean_books = clean_and_validate(raw_books)
-    rejected = len(raw_books) - len(clean_books)
+    # Process and save one page at a time instead of accumulating every
+    # row in memory before storing anything -- bounds memory to roughly
+    # one page's worth of rows regardless of how many pages the site has,
+    # and a crash partway through still leaves everything scraped so far
+    # safely committed to the database.
+    total_parsed = 0
+    total_rejected = 0
+    totals = {"new": 0, "changed": 0, "unchanged": 0}
 
     with Session(engine) as session:
-        stats = upsert_books(session, clean_books)
+        for page_num, html in iter_catalogue_pages(delay_seconds=1.0):
+            page_url = f"{BASE_URL}catalogue/page-{page_num}.html"
+            save_raw_snapshot(html, page_num, Path("data/raw_html"))
+
+            raw_page = parse_books(html, page_url=page_url)
+            clean_page = clean_and_validate(raw_page)
+            total_parsed += len(raw_page)
+            total_rejected += len(raw_page) - len(clean_page)
+
+            page_stats = upsert_books(session, clean_page)  # commits this page now
+            for key in totals:
+                totals[key] += page_stats[key]
+            logger.info(
+                "page {}: {} rows ({} rejected)",
+                page_num, len(clean_page), len(raw_page) - len(clean_page),
+            )
+
+        out_path = Path("data/books_catalogue.csv")
+        row_count = export_books_csv(session, out_path)
 
     logger.info(
         "validated {}/{} rows ({} rejected) — new={} changed={} unchanged={}",
-        len(clean_books), len(raw_books), rejected, stats["new"], stats["changed"], stats["unchanged"],
+        total_parsed - total_rejected, total_parsed, total_rejected,
+        totals["new"], totals["changed"], totals["unchanged"],
     )
-
-    out_path = Path("data/books_catalogue.csv")
-    save_csv([Book(url=r.url, title=r.title, price=r.price, rating=r.rating,
-                    availability=r.availability) for r in clean_books], out_path)
-    logger.info("Saved {} current rows to {}", len(clean_books), out_path)
+    logger.info("Saved {} current rows to {}", row_count, out_path)
 
 
 if __name__ == "__main__":

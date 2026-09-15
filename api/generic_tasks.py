@@ -21,7 +21,7 @@ from scrapers.books_toscrape.storage.raw_snapshots import save_raw_snapshot
 from scrapers.common.fetch import fetch_robots_txt, is_allowed
 from scrapers.generic.fetch import iter_list_pages
 from scrapers.generic.parser import parse_items
-from scrapers.generic.quality import build_generic_quality_report
+from scrapers.generic.quality import GenericQualityAccumulator
 from scrapers.generic.storage import (
     SiteORM,
     previous_successful_row_count_for_site,
@@ -63,38 +63,52 @@ def run_generic_scrape_job(
             if not is_allowed(robots_txt, "/"):
                 raise RuntimeError(f"robots.txt disallows scraping {site.base_url}")
 
-            raw_items: list[dict] = []
+            # Same page-at-a-time processing as api/tasks.py's
+            # run_scrape_job: bounds memory to roughly one page's items
+            # regardless of site size, and each page's rows are safely
+            # committed before the next page is even fetched.
+            accumulator = GenericQualityAccumulator(site)
+            totals = {"new": 0, "changed": 0, "unchanged": 0}
+
             for page_num, html, page_url in iter_list_pages(site, delay_seconds=1.0):
                 save_raw_snapshot(html, page_num, Path("data/raw_html") / site.id)
-                raw_items.extend(parse_items(html, page_url, site))
 
-            clean_items, rejected = clean_and_validate_items(raw_items, site)
-            stats = upsert_items(session, site, clean_items, job_id=job_id)
+                raw_page = parse_items(html, page_url, site)
+                clean_page, _ = clean_and_validate_items(raw_page, site)
+                accumulator.add_batch(raw_page, clean_page)
+
+                page_stats = upsert_items(session, site, clean_page, job_id=job_id)  # commits this page now
+                for key in totals:
+                    totals[key] += page_stats[key]
+                logger.debug(
+                    "site {} page {}: {} rows ({} rejected)",
+                    site.name, page_num, len(clean_page), len(raw_page) - len(clean_page),
+                )
 
             job.status = "succeeded"
-            job.rows_new = stats["new"]
-            job.rows_changed = stats["changed"]
-            job.rows_unchanged = stats["unchanged"]
-            job.rows_rejected = rejected
+            job.rows_new = totals["new"]
+            job.rows_changed = totals["changed"]
+            job.rows_unchanged = totals["unchanged"]
+            job.rows_rejected = accumulator.rejected
             job.finished_at = datetime.now(timezone.utc)
             session.commit()
 
-            current_row_count = stats["new"] + stats["changed"] + stats["unchanged"]
+            current_row_count = totals["new"] + totals["changed"] + totals["unchanged"]
             baseline = previous_successful_row_count_for_site(session, site.id, job_id)
 
-            report = build_generic_quality_report(raw_items, clean_items, site, current_row_count, baseline)
+            report = accumulator.build_report(current_row_count, baseline)
             job.quality_report = json.dumps(report)
             session.commit()
             logger.bind(job_id=job_id, site_id=site.id, quality_report=report).info(
                 "job {} finished: {} new, {} changed, {} unchanged, {} rejected",
-                job_id, stats["new"], stats["changed"], stats["unchanged"], rejected,
+                job_id, totals["new"], totals["changed"], totals["unchanged"], accumulator.rejected,
             )
 
             warnings = check_job_quality(
                 current_row_count=current_row_count,
                 previous_row_count=baseline,
-                rejected=rejected,
-                total_parsed=len(raw_items),
+                rejected=accumulator.rejected,
+                total_parsed=accumulator.total_parsed,
                 max_reject_ratio=max_reject_ratio,
                 max_row_drop_ratio=max_row_drop_ratio,
             )
