@@ -1,0 +1,22 @@
+# Phase 6: config-over-code. A new site to scrape means a new YAML file
+# like this one, not new Python -- scrape.py/tasks.py stay generic and
+# read schedule/limits/thresholds from here.
+name: books_toscrape
+base_url: "https://books.toscrape.com/"
+
+# Standard 5-field cron: minute hour day-of-month month day-of-week.
+# Hourly, matching Phase 0's "near-real-time monitoring" cadence.
+schedule: "0 * * * *"
+
+max_pages: 50
+
+retry:
+  max_retries: 3
+
+quality:
+  # >= this fraction of parsed rows rejected by validation -> alert
+  # (typical sign a CSS selector broke and is now pulling garbage).
+  max_reject_ratio: 0.5
+  # >= this fractional drop in row count vs. the previous successful run
+  # -> alert (typical sign the page layout changed or we got blocked).
+  max_row_drop_ratio: 0.4

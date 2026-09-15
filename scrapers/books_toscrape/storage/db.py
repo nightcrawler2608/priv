@@ -21,7 +21,7 @@ import os
 from datetime import datetime, timezone
 from pathlib import Path
 
-from sqlalchemy import DateTime, Float, ForeignKey, Integer, String, create_engine
+from sqlalchemy import DateTime, Float, ForeignKey, Integer, String, create_engine, select
 from sqlalchemy.orm import DeclarativeBase, Mapped, Session, mapped_column
 
 from ..models import BookRecord
@@ -47,6 +47,11 @@ class JobORM(Base):
     rows_unchanged: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     rows_rejected: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     error_message: Mapped[str | None] = mapped_column(String, nullable=True)
+    # Phase 6: automation bookkeeping.
+    retry_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    triggered_by: Mapped[str] = mapped_column(String, nullable=False, default="manual")  # manual|scheduled|retry
+    quality_warnings: Mapped[str | None] = mapped_column(String, nullable=True)  # "; "-joined, empty/None if healthy
+    permanently_failed: Mapped[bool] = mapped_column(default=False)  # retries exhausted, already alerted -- don't re-alert
 
 
 class BookORM(Base):
@@ -88,6 +93,28 @@ def get_engine(db_url: str | None = None):
 
 def init_db(engine) -> None:
     Base.metadata.create_all(engine)
+
+
+def previous_successful_row_count(session: Session, before_job_id: str) -> int | None:
+    """Total rows (new+changed+unchanged) from the most recent job that
+    succeeded before this one -- the baseline check_job_quality() compares
+    against to spot a sudden drop. None if there is no prior successful run."""
+    before = session.get(JobORM, before_job_id)
+    if before is None:
+        return None
+    prev = session.scalars(
+        select(JobORM)
+        .where(
+            JobORM.status == "succeeded",
+            JobORM.id != before_job_id,
+            JobORM.created_at < before.created_at,
+        )
+        .order_by(JobORM.created_at.desc())
+        .limit(1)
+    ).first()
+    if prev is None:
+        return None
+    return prev.rows_new + prev.rows_changed + prev.rows_unchanged
 
 
 def upsert_books(

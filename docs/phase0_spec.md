@@ -75,3 +75,21 @@ site couldn't be demoed here; the real backend's logic is already covered
 by the 32 Phase 1-4 tests, which do run against real (fixture-driven)
 parsing/storage code. Run locally: `npm run dev` in `frontend/` with
 `VITE_API_URL` pointing at a running `uvicorn api.main:app`.
+Phase 6: automation — `config/books_toscrape.yaml` holds the site's
+schedule, page limit, and quality thresholds (`scrapers/books_toscrape/config.py`
+loads/validates it as config-over-code: a new site is a new YAML file, not
+new Python). `celery_app.py`'s `beat_schedule` fires `run_scrape_job_from_config`
+hourly and `retry_failed_jobs` every 15 minutes (`celery -A api.celery_app beat`).
+Quality gates (`quality.py`) catch the failure mode retries/error-handling
+can't: a broken selector doesn't crash, it just silently produces
+wrong/empty data, so every run's reject ratio and row-count-vs-previous-run
+are checked and an alert fires (`alerts.py`, opt-in via `ALERT_WEBHOOK_URL`
+— e.g. an n8n webhook or Slack incoming webhook) when either looks wrong.
+Self-healing retries re-queue a failed job up to `retry.max_retries` times
+(transient errors get another chance); a job that exhausts its budget is
+left failed and alerted on exactly once (`permanently_failed` flag prevents
+repeat alerts). All offline: Celery tasks called directly (bypasses broker
+entirely, runs synchronously) with the pipeline's network calls faked via
+the Phase 1 fixture, `requests.post` mocked for alert delivery
+(`tests/test_config.py`, `tests/test_quality.py`, `tests/test_alerts.py`,
+`tests/test_automation.py`) — 50/50 tests passing.
