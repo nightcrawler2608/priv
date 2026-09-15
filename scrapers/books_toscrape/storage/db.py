@@ -53,6 +53,11 @@ class JobORM(Base):
     quality_warnings: Mapped[str | None] = mapped_column(String, nullable=True)  # "; "-joined, empty/None if healthy
     permanently_failed: Mapped[bool] = mapped_column(default=False)  # retries exhausted, already alerted -- don't re-alert
     quality_report: Mapped[str | None] = mapped_column(String, nullable=True)  # JSON string, see quality.build_quality_report
+    # "config-driven sites" feature: set for a job run against a generic
+    # SiteDefinition (scrapers/generic), None for the books_toscrape jobs
+    # from Phases 1-7. FK resolved by table name -- scrapers.generic.storage
+    # must be imported before init_db() runs so the `sites` table exists.
+    site_id: Mapped[str | None] = mapped_column(String, ForeignKey("sites.id"), nullable=True)
 
 
 class BookORM(Base):

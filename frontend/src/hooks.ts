@@ -1,5 +1,5 @@
 import { useQuery } from "@tanstack/react-query";
-import { getJob, getResults } from "./api";
+import { getJob, getResults, getSiteResults, listSites } from "./api";
 
 const ACTIVE_STATUSES = new Set(["queued", "running"]);
 
@@ -23,5 +23,23 @@ export function useResults(jobId: string | null, limit: number, offset: number, 
     queryKey: ["results", jobId, limit, offset],
     queryFn: () => getResults(jobId as string, limit, offset),
     enabled: jobId !== null && enabled,
+  });
+}
+
+export function useSites() {
+  return useQuery({ queryKey: ["sites"], queryFn: listSites });
+}
+
+export function useSiteResults(
+  siteId: string | null,
+  jobId: string | null,
+  limit: number,
+  offset: number,
+  enabled: boolean,
+) {
+  return useQuery({
+    queryKey: ["site-results", siteId, jobId, limit, offset],
+    queryFn: () => getSiteResults(siteId as string, jobId as string, limit, offset),
+    enabled: siteId !== null && jobId !== null && enabled,
   });
 }

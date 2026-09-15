@@ -1,10 +1,18 @@
 """
-Phase 4: FastAPI backend.
+Phase 4: FastAPI backend. Plus the config-driven "sites" feature (any URL,
+any fields, described by a SiteDefinition instead of hardcoded Python):
 
-POST   /jobs                -> create a scrape job, hand it to Celery, return 202 immediately
-GET    /jobs/{id}            -> job status + row counts
-GET    /jobs/{id}/results    -> paginated rows that job produced
-GET    /jobs/{id}/export     -> CSV download of that job's rows
+POST   /jobs                       -> create a books_toscrape scrape job, 202 immediately
+GET    /jobs/{id}                  -> job status + row counts (works for either kind of job)
+GET    /jobs/{id}/results          -> paginated rows that job produced (books_toscrape)
+GET    /jobs/{id}/export           -> CSV download of that job's rows (books_toscrape)
+
+POST   /sites                      -> save a new site definition (URL + CSS selectors)
+GET    /sites                      -> list saved sites
+GET    /sites/{site_id}            -> one site definition
+POST   /sites/{site_id}/jobs       -> create+run a scrape job for that site, 202 immediately
+GET    /sites/{site_id}/jobs/{id}/results -> paginated rows that job produced
+GET    /sites/{site_id}/jobs/{id}/export  -> CSV download of that job's rows
 
 Run locally:  uvicorn api.main:app --reload --port 8000
 (needs a Celery worker running too: celery -A api.celery_app worker --loglevel=info,
@@ -13,6 +21,7 @@ Run locally:  uvicorn api.main:app --reload --port 8000
 from __future__ import annotations
 
 import io
+import json
 import uuid
 from datetime import datetime, timezone
 
@@ -20,12 +29,17 @@ import pandas as pd
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
+from pydantic import ValidationError
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from scrapers.books_toscrape.logging_config import configure_logging
 from scrapers.books_toscrape.storage.db import BookHistoryORM, JobORM, get_engine, init_db
+from scrapers.generic.models import SiteDefinition
+from scrapers.generic.storage import ItemHistoryORM, SiteORM  # noqa: F401 -- import registers these tables on Base.metadata
 
+from .generic_schemas import FieldConfigIn, ItemOut, PaginatedItems, SiteCreate, SiteOut
+from .generic_tasks import run_generic_scrape_job
 from .schemas import BookOut, JobCreate, JobOut, PaginatedBooks
 from .tasks import run_scrape_job
 
@@ -126,4 +140,128 @@ def export_results(job_id: str) -> StreamingResponse:
         iter([buf.getvalue()]),
         media_type="text/csv",
         headers={"Content-Disposition": f'attachment; filename="books_{job_id}.csv"'},
+    )
+
+
+def _site_orm_to_out(row: SiteORM) -> SiteOut:
+    return SiteOut(
+        id=row.id, name=row.name, base_url=row.base_url,
+        list_url_template=row.list_url_template, item_selector=row.item_selector,
+        key_selector=row.key_selector, key_attr=row.key_attr,
+        fields=[FieldConfigIn(**f) for f in json.loads(row.fields_json)],
+        max_pages=row.max_pages, created_at=row.created_at,
+    )
+
+
+@app.post("/sites", status_code=201, response_model=SiteOut)
+def create_site(payload: SiteCreate) -> SiteOut:
+    site_id = uuid.uuid4().hex
+    try:
+        # Round-trip through SiteDefinition so the same validation used at
+        # scrape time (unique field names, "{page}" placeholder, etc.)
+        # rejects a bad config immediately instead of at the first job.
+        SiteDefinition(
+            id=site_id, name=payload.name, base_url=payload.base_url,
+            list_url_template=payload.list_url_template, item_selector=payload.item_selector,
+            key_selector=payload.key_selector, key_attr=payload.key_attr,
+            fields=[f.model_dump() for f in payload.fields], max_pages=payload.max_pages,
+        )
+    except ValidationError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+    with _session() as session:
+        row = SiteORM(
+            id=site_id, name=payload.name, base_url=payload.base_url,
+            list_url_template=payload.list_url_template, item_selector=payload.item_selector,
+            key_selector=payload.key_selector, key_attr=payload.key_attr,
+            fields_json=json.dumps([f.model_dump() for f in payload.fields]),
+            max_pages=payload.max_pages, created_at=datetime.now(timezone.utc),
+        )
+        session.add(row)
+        session.commit()
+        session.refresh(row)
+        return _site_orm_to_out(row)
+
+
+@app.get("/sites", response_model=list[SiteOut])
+def list_sites() -> list[SiteOut]:
+    with _session() as session:
+        rows = session.scalars(select(SiteORM).order_by(SiteORM.created_at.desc())).all()
+        return [_site_orm_to_out(r) for r in rows]
+
+
+@app.get("/sites/{site_id}", response_model=SiteOut)
+def get_site(site_id: str) -> SiteOut:
+    with _session() as session:
+        row = session.get(SiteORM, site_id)
+        if row is None:
+            raise HTTPException(status_code=404, detail="site not found")
+        return _site_orm_to_out(row)
+
+
+@app.post("/sites/{site_id}/jobs", status_code=202, response_model=JobOut)
+def create_site_job(site_id: str) -> JobOut:
+    with _session() as session:
+        site_row = session.get(SiteORM, site_id)
+        if site_row is None:
+            raise HTTPException(status_code=404, detail="site not found")
+
+        job_id = uuid.uuid4().hex
+        job = JobORM(
+            id=job_id, status="queued", max_pages=site_row.max_pages, site_id=site_id,
+            created_at=datetime.now(timezone.utc),
+            rows_new=0, rows_changed=0, rows_unchanged=0, rows_rejected=0,
+        )
+        session.add(job)
+        session.commit()
+        session.refresh(job)
+        out = JobOut.model_validate(job)
+
+    run_generic_scrape_job.delay(job_id, site_id)
+    return out
+
+
+@app.get("/sites/{site_id}/jobs/{job_id}/results", response_model=PaginatedItems)
+def get_site_job_results(site_id: str, job_id: str, limit: int = 50, offset: int = 0) -> PaginatedItems:
+    if limit < 1 or limit > 500:
+        raise HTTPException(status_code=422, detail="limit must be between 1 and 500")
+
+    with _session() as session:
+        job = session.get(JobORM, job_id)
+        if job is None or job.site_id != site_id:
+            raise HTTPException(status_code=404, detail="job not found for this site")
+
+        base = select(ItemHistoryORM).where(ItemHistoryORM.job_id == job_id)
+        total = session.scalar(select(func.count()).select_from(base.subquery()))
+        rows = session.scalars(
+            base.order_by(ItemHistoryORM.item_key).limit(limit).offset(offset)
+        ).all()
+
+        return PaginatedItems(
+            total=total or 0,
+            limit=limit,
+            offset=offset,
+            items=[ItemOut(key=r.item_key, data=json.loads(r.data_json), recorded_at=r.recorded_at) for r in rows],
+        )
+
+
+@app.get("/sites/{site_id}/jobs/{job_id}/export")
+def export_site_job_results(site_id: str, job_id: str) -> StreamingResponse:
+    with _session() as session:
+        job = session.get(JobORM, job_id)
+        if job is None or job.site_id != site_id:
+            raise HTTPException(status_code=404, detail="job not found for this site")
+
+        rows = session.scalars(
+            select(ItemHistoryORM).where(ItemHistoryORM.job_id == job_id).order_by(ItemHistoryORM.item_key)
+        ).all()
+        df = pd.DataFrame([json.loads(r.data_json) for r in rows])
+
+    buf = io.StringIO()
+    df.to_csv(buf, index=False)
+    buf.seek(0)
+    return StreamingResponse(
+        iter([buf.getvalue()]),
+        media_type="text/csv",
+        headers={"Content-Disposition": f'attachment; filename="{site_id}_{job_id}.csv"'},
     )

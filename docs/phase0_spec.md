@@ -111,3 +111,35 @@ environment. `.github/workflows/ci.yml` runs `pytest` and `tsc`+`vitest`
 on every push/PR. New tests: `tests/test_quality_report.py`,
 `tests/test_logging_config.py` — 57/57 backend tests passing, 7/7 frontend
 tests passing.
+Config-driven sites ("paste a URL + CSS selectors, no code") — a second,
+generic scraping engine (`scrapers/generic/`) that coexists with the
+hardcoded books_toscrape pipeline rather than replacing it:
+`models.SiteDefinition` describes a site as data (base URL, a
+`{page}`-templated list URL, an item CSS selector, and a list of fields
+each with their own selector/attribute/type/required); `parser.py`
+extracts items with BeautifulSoup driven entirely by that config;
+`validate.py` coerces/rejects rows per field type, same idempotent
+row-hash pattern as Phase 3; `storage.py` adds `sites`/`items`/`item_history`
+tables (items stored as JSON since fields vary per site) sharing the same
+database as the books_toscrape tables; `JobORM` gained a nullable `site_id`
+so one `jobs` table covers both engines. Reused rather than duplicated:
+Phase 2's retry/backoff/robots.txt logic moved to `scrapers/common/fetch.py`
+(books_toscrape now imports it too — refactor, not a rewrite) and Phase 6's
+`check_job_quality()` pass/fail thresholds. New API endpoints: `POST /sites`,
+`GET /sites`, `GET /sites/{id}`, `POST /sites/{id}/jobs`,
+`GET /sites/{id}/jobs/{job_id}/results`, `GET /sites/{id}/jobs/{job_id}/export`.
+Frontend: a "Custom Sites" tab alongside the existing Books dashboard, with
+a form for entering a site's selectors (dynamic field rows) and a results
+table with dynamic columns matching whatever fields were configured.
+Documented v1 limits: only simple one-selector-per-field extraction (no
+per-site special-casing like books_toscrape's star-rating-from-CSS-class
+logic), pagination is a single URL template (no JS-rendered infinite
+scroll, no POST-based pagination). Tested offline (parser/validator/storage
+unit tests plus a full API test proving the config-driven engine reproduces
+the hardcoded scraper's output against the same fixture:
+`tests/test_generic_parser.py`, `test_generic_validate.py`,
+`test_generic_storage.py`, `test_generic_api.py`) and additionally verified
+with a real, non-mocked HTTP run (backend actually scraping a local test
+server via retry/robots.txt/pagination logic, driven end-to-end through the
+real browser UI) — 79/79 backend tests passing, 11/11 frontend tests
+passing.

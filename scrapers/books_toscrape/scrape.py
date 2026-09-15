@@ -14,15 +14,13 @@ import time
 from dataclasses import asdict
 from pathlib import Path
 from urllib.parse import urljoin
-from urllib.robotparser import RobotFileParser
 
 import pandas as pd
-import requests
 from bs4 import BeautifulSoup
 from loguru import logger
 from sqlalchemy.orm import Session
-from tenacity import Retrying, retry_if_exception_type, stop_after_attempt, wait_exponential
 
+from ..common.fetch import PermanentFetchError, TransientFetchError, fetch_html, is_allowed
 from .logging_config import configure_logging
 from .models import Book, clean_and_validate
 from .storage.db import get_engine, init_db, upsert_books
@@ -35,53 +33,9 @@ USER_AGENT = "data-scraping-tool-tutorial/0.1 (+https://github.com/; learning pr
 
 RATING_WORDS = {"Zero": 0, "One": 1, "Two": 2, "Three": 3, "Four": 4, "Five": 5}
 
-# Requests that failed for a reason worth retrying (network hiccup, server
-# overloaded, rate-limited). The caller should back off and try again.
-class TransientFetchError(Exception):
-    pass
-
-
-# Requests that failed for a reason that will never change on retry (page
-# genuinely doesn't exist, we're blocked). Retrying is pointless / rude.
-class PermanentFetchError(Exception):
-    pass
-
-
-def _fetch_once(url: str) -> str:
-    try:
-        resp = requests.get(url, headers={"User-Agent": USER_AGENT}, timeout=10)
-    except (requests.exceptions.Timeout, requests.exceptions.ConnectionError) as exc:
-        raise TransientFetchError(f"network error fetching {url}: {exc}") from exc
-
-    if resp.status_code == 404:
-        raise PermanentFetchError(f"404 Not Found: {url}")
-    if resp.status_code == 403:
-        raise PermanentFetchError(f"403 Forbidden (blocked?): {url}")
-    if resp.status_code == 429 or 500 <= resp.status_code < 600:
-        raise TransientFetchError(f"HTTP {resp.status_code} from {url}")
-
-    resp.raise_for_status()
-    return resp.text
-
-
-def fetch_html(url: str = CATALOGUE_URL, *, max_attempts: int = 4, base_delay: float = 1.0) -> str:
-    """Download one page's raw HTML, retrying transient failures with
-    exponential backoff. Permanent failures (404/403) raise immediately,
-    with no retry."""
-    retryer = Retrying(
-        stop=stop_after_attempt(max_attempts),
-        wait=wait_exponential(multiplier=base_delay, min=base_delay, max=base_delay * 8),
-        retry=retry_if_exception_type(TransientFetchError),
-        reraise=True,
-    )
-    return retryer(_fetch_once, url)
-
-
-def is_allowed(robots_txt: str, path: str, user_agent: str = USER_AGENT) -> bool:
-    """Pure function: given robots.txt content, is this path allowed?"""
-    rp = RobotFileParser()
-    rp.parse(robots_txt.splitlines())
-    return rp.can_fetch(user_agent, path)
+# TransientFetchError, PermanentFetchError, fetch_html, is_allowed now live
+# in scrapers.common.fetch (shared with the generic scraper) -- re-exported
+# here (via the import above) so existing imports of this module keep working.
 
 
 def fetch_robots_txt(base_url: str = BASE_URL) -> str:
