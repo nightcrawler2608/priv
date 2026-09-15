@@ -54,7 +54,7 @@ def test_detected_config_produces_correct_data_through_the_real_parser():
         item_selector=detected.item_selector,
         key_selector=detected.key_selector, key_attr=detected.key_attr,
         fields=[
-            FieldConfig(name=f.name, selector=f.selector, attr=f.attr, type=f.type, required=False)
+            FieldConfig(name=f.name, selector=f.selector, attr=f.attr, type=f.type, required=f.required)
             for f in detected.fields
         ],
     )
@@ -73,7 +73,69 @@ def test_detected_config_produces_correct_data_through_the_real_parser():
     assert first["price"] == 51.77
 
 
+def test_first_detected_field_is_marked_required():
+    """The first field found (usually "title") being required is what
+    naturally filters out junk rows sharing the item's shape but not its
+    content -- see test_wikipedia_style_table_* below."""
+    html = FIXTURE.read_text(encoding="utf-8")
+    result = detect_site_structure(html)
+    assert result.fields[0].required is True
+
+
 def test_returns_none_for_a_page_with_no_repeated_structure():
     html = "<html><body><h1>Just one article</h1><p>No list here.</p></body></html>"
     result = detect_site_structure(html)
     assert result is None
+
+
+WIKI_TABLE_HTML = """
+<html><body>
+<table class="wikitable sortable">
+<tbody>
+<tr><th>Country</th><th>Population</th></tr>
+<tr><td><a href="/wiki/China">China</a></td><td>1,412,000,000</td></tr>
+<tr><td><a href="/wiki/India">India</a></td><td>1,417,000,000</td></tr>
+<tr><td><a href="/wiki/USA">United States</a></td><td>335,000,000</td></tr>
+<tr><td><a href="/wiki/Indonesia">Indonesia</a></td><td>277,000,000</td></tr>
+</tbody>
+</table>
+</body></html>
+"""
+
+
+def test_detects_classless_table_rows_scoped_to_their_table():
+    """A Wikipedia-style table: <tr> rows have no class attribute at all --
+    a real gap the first version of this heuristic had, since it only
+    considered elements with a class."""
+    result = detect_site_structure(WIKI_TABLE_HTML)
+
+    assert result is not None
+    assert result.item_count == 5  # 4 data rows + 1 header row (still matches the shape)
+    assert "wikitable" in result.item_selector
+    assert "tr" in result.item_selector
+
+
+def test_header_row_is_excluded_after_validation_not_extraction():
+    """detect_site_structure() itself can't tell a header row from a data
+    row (same tag, same parent) -- it's the required-field validation,
+    downstream, that correctly drops it. This is the actual end-to-end
+    behavior a user sees."""
+    result = detect_site_structure(WIKI_TABLE_HTML)
+
+    site = SiteDefinition(
+        id="wiki1", name="wiki-test", base_url="https://it.wikipedia.org/",
+        list_url_template="https://it.wikipedia.org/wiki/Test",
+        item_selector=result.item_selector, key_selector=result.key_selector, key_attr=result.key_attr,
+        fields=[
+            FieldConfig(name=f.name, selector=f.selector, attr=f.attr, type=f.type, required=f.required)
+            for f in result.fields
+        ],
+    )
+
+    raw_items = parse_items(WIKI_TABLE_HTML, "https://it.wikipedia.org/wiki/Test", site)
+    clean_items, rejected = clean_and_validate_items(raw_items, site)
+
+    assert rejected == 1  # just the header row
+    assert len(clean_items) == 4
+    titles = {item["title"] for item in clean_items}
+    assert titles == {"China", "India", "United States", "Indonesia"}

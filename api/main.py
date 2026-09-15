@@ -233,7 +233,7 @@ def detect_site(payload: DetectSiteRequest) -> DetectSiteResponse:
 
     parsed = urlparse(payload.url)
     base_url = f"{parsed.scheme}://{parsed.netloc}/"
-    fields_out = [FieldConfigIn(name=f.name, selector=f.selector, attr=f.attr, type=f.type, required=False) for f in detected.fields]
+    fields_out = [FieldConfigIn(name=f.name, selector=f.selector, attr=f.attr, type=f.type, required=f.required) for f in detected.fields]
 
     # A real preview, not just the guessed selector names -- built from a
     # throwaway SiteDefinition run through the actual parser, so what the

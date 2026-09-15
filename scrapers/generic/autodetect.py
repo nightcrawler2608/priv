@@ -35,6 +35,7 @@ class DetectedField:
     selector: str  # relative to the item root
     attr: str
     type: str
+    required: bool = False
 
 
 @dataclass
@@ -54,12 +55,18 @@ def _element_signature(tag: Tag) -> tuple[str, tuple[str, ...]]:
 def _find_item_candidates(soup: BeautifulSoup) -> list[Tag]:
     """Group elements by (tag, classes) sharing the same parent; return
     the members of whichever group repeats the most. Blocklist tags that
-    are structural, not "an item" (html/body/head, script/style)."""
+    are structural, not "an item" (html/body/head, script/style).
+
+    Elements with NO class attribute are grouped too -- plain <tr> rows in
+    a Wikipedia-style table, or bare <li> items, very often have none.
+    Grouping is still precise because the key includes the shared parent:
+    all classless <tr> rows of one specific <tbody> form their own group,
+    distinct from any other table's rows on the same page."""
     skip_tags = {"html", "body", "head", "script", "style", "meta", "link", "br", "hr"}
     groups: dict[tuple[Tag, tuple[str, tuple[str, ...]]], list[Tag]] = {}
 
     for tag in soup.find_all(True):
-        if tag.name in skip_tags or not tag.get("class"):
+        if tag.name in skip_tags:
             continue
         parent = tag.parent
         if parent is None:
@@ -76,10 +83,27 @@ def _find_item_candidates(soup: BeautifulSoup) -> list[Tag]:
 
 
 def _css_selector_for(tag: Tag) -> str:
-    """A short, robust selector for this tag: its own tag+class combo."""
+    """A short, robust selector for this tag: its own tag+class combo. When
+    the tag has no class of its own, scope it with the nearest classed
+    ancestor (e.g. "table.wikitable tr") instead of a bare tag name -- a
+    bare "tr" or "li" would match every such element anywhere on the page.
+    Walks past classless wrapper tags (a plain <tbody> is extremely common
+    between a classed <table> and its classless <tr> rows) to find one.
+
+    Known limitation: if a page has several structurally-identical
+    tables/lists (e.g. multiple "wikitable"s), this selector matches all
+    of them, not just the one detected -- visible and correctable in the
+    preview step, not a silent wrong answer."""
     classes = tag.get("class", [])
     if classes:
         return f"{tag.name}." + ".".join(classes)
+
+    ancestor = tag.parent
+    while isinstance(ancestor, Tag) and not ancestor.get("class"):
+        ancestor = ancestor.parent
+    if isinstance(ancestor, Tag) and ancestor.get("class"):
+        ancestor_selector = f"{ancestor.name}." + ".".join(ancestor.get("class", []))
+        return f"{ancestor_selector} {tag.name}"
     return tag.name
 
 
@@ -120,30 +144,43 @@ def detect_site_structure(html: str) -> DetectionResult | None:
         return None
 
     item_selector = _css_selector_for(candidates[0])
-    example = candidates[0]
 
+    # The first matching element in DOM order isn't necessarily a good
+    # example to guess fields from -- a table's header row (<th> cells, no
+    # links) matches the same (tag, parent) signature as its data rows but
+    # has nothing extractable. Try candidates in order until one actually
+    # yields at least one field.
     fields: list[DetectedField] = []
+    key_link: Tag | None = None
     seen_names: set[str] = set()
 
-    def add_field(name: str, el: Tag | None, attr: str, field_type: str) -> None:
-        if el is None or el is example or name in seen_names:
-            return  # el is example: the guessed field IS the item root -- too rare/ambiguous to express as a selector, skip it
-        selector = _css_selector_for(el)
-        fields.append(DetectedField(name=name, selector=selector, attr=attr, type=field_type))
-        seen_names.add(name)
+    for example in candidates:
+        fields = []
+        seen_names = set()
 
-    title_el = _guess_title(example)
-    add_field("title", title_el, "text", "text")
+        def add_field(name: str, el: Tag | None, attr: str, field_type: str, _example=example) -> None:
+            if el is None or el is _example or name in seen_names:
+                return  # el is _example: the guessed field IS the item root -- too rare/ambiguous to express as a selector, skip it
+            selector = _css_selector_for(el)
+            fields.append(DetectedField(name=name, selector=selector, attr=attr, type=field_type))
+            seen_names.add(name)
 
-    price_el = _guess_price(example)
-    add_field("price", price_el, "text", "number")
+        add_field("title", _guess_title(example), "text", "text")
+        add_field("price", _guess_price(example), "text", "number")
+        key_link = _guess_key_link(example)
+        if key_link is not None:
+            add_field("link", key_link, "href", "text")
+        add_field("image", _guess_image(example), "src", "text")
 
-    key_link = _guess_key_link(example)
-    if key_link is not None:
-        add_field("link", key_link, "href", "text")
-
-    image_el = _guess_image(example)
-    add_field("image", image_el, "src", "text")
+        if fields:
+            # The first field found (usually "title") is required: this is
+            # what naturally filters out junk rows sharing the item's shape
+            # but not its content -- a table's <th> header row matches the
+            # same (tag, parent) signature as its <tr> data rows but has no
+            # title/link, so validation now rejects it instead of it
+            # showing up as a row of nulls.
+            fields[0].required = True
+            break
 
     if not fields:
         return None

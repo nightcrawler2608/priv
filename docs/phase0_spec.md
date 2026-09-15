@@ -283,3 +283,32 @@ real, non-mocked browser run against a local test server: pasted a URL,
 clicked Detect, saved the result with zero manual edits, ran it, and got
 all 6 correct rows. 96/96 backend tests passing, 13/13 frontend tests
 passing.
+
+Fixed two real auto-detect gaps found by an actual user trying real
+sites. Site 1 (LinkedIn company page) correctly failed -- JS-rendered,
+login-walled, and not a list page at all; not a bug, and LinkedIn's ToS
+explicitly prohibits scraping regardless, so this tool shouldn't target
+it either way. Site 2 (a Wikipedia list-style page) exposed real bugs:
+1. The heuristic only considered elements that HAD a `class` attribute --
+   but a `<tr>` in a typical Wikipedia wikitable has none at all (only
+   the `<table>` itself does, often with a classless `<tbody>` in
+   between). `_find_item_candidates()` now groups classless elements too
+   (grouping is still precise because the key includes the shared
+   parent); `_css_selector_for()` walks up past classless wrapper tags to
+   scope the selector against the nearest classed ancestor (e.g.
+   `table.wikitable tr`) instead of emitting a bare `tr`/`li` that would
+   match every such element on the whole page.
+2. Fields were always guessed from `candidates[0]`, the first matching
+   element in DOM order -- for a table that's the header row (`<th>`
+   cells, no links), which yielded zero fields and made detection report
+   total failure even though the data rows right below it were perfectly
+   extractable. Now tries each candidate in turn until one actually
+   yields a field.
+3. Once fields *were* found, the header row still showed up in the
+   preview as a row of nulls (it matches the same tag/parent shape as
+   real rows). Fixed by marking the first detected field required by
+   default (previously all fields defaulted to not-required) -- the
+   existing required-field validation in `clean_and_validate_items()`
+   then rejects the header row on its own, no special-casing needed.
+`tests/test_autodetect.py` gained a synthetic Wikipedia-style table
+fixture covering all three. 99/99 backend tests passing.
