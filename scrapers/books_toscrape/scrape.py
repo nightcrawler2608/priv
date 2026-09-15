@@ -79,7 +79,7 @@ def parse_books(html: str, page_url: str = CATALOGUE_URL) -> list[Book]:
         url = urljoin(page_url, link["href"])
 
         price_text = article.select_one("p.price_color").get_text(strip=True)
-        price = float(price_text.replace("£", "").replace("£", ""))
+        price = float(price_text.replace("£", ""))
 
         rating_classes = article.select_one("p.star-rating")["class"]
         # classes look like ["star-rating", "Three"] -- the word is the rating

@@ -226,3 +226,25 @@ this exact bug even after the shared fix) -- it now delegates to the
 shared, fixed version. `tests/test_robots_missing.py` is a permanent
 regression test, confirmed (by temporarily reverting the fix) to actually
 fail without it. 86/86 backend tests passing.
+
+Fixed a second real bug from the same live-scrape session: prices came
+through as `Â51.77` instead of `£51.77`, which failed `float()` conversion
+and crashed every job. Root cause: `requests` defaults to decoding a
+response as ISO-8859-1 whenever the server's `Content-Type` header omits
+a charset -- true of books.toscrape.com, like most real sites, which only
+declares UTF-8 via an HTML `<meta charset>` tag, not the HTTP header.
+Decoding UTF-8 bytes as ISO-8859-1 turns `£` (bytes `0xC2 0xA3`) into
+`Â£`. `scrapers/common/fetch.py`'s `_fetch_once()` now checks for a
+declared charset and, when absent, re-decodes using `resp.apparent_encoding`
+(real content-based detection) instead of trusting the default -- an
+explicitly declared non-UTF-8 charset is still respected. Also removed a
+dead, duplicate `.replace("£", "")` call in `scrape.py`'s price parsing
+(confirmed via raw byte inspection to be two copies of the exact same
+character, not a second mojibake variant it was quietly working around).
+The generic config-driven engine's number coercion was checked and found
+to already tolerate this bug by construction (it strips any non-numeric
+character), though it would have silently corrupted text fields like
+title -- another reason to fix the root cause rather than rely on
+downstream tolerance. `tests/test_encoding.py` is a permanent regression
+test, confirmed (by temporarily reverting the fix) to reproduce the exact
+`Â£51.77` mojibake without it. 88/88 backend tests passing.

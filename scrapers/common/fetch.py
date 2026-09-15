@@ -42,6 +42,19 @@ def _fetch_once(url: str, user_agent: str) -> str:
         raise TransientFetchError(f"HTTP {resp.status_code} from {url}")
 
     resp.raise_for_status()
+
+    # requests defaults to ISO-8859-1 when the server's Content-Type header
+    # doesn't declare a charset (a real HTTP spec default) -- but nearly
+    # every real site is actually UTF-8 and only declares it via an HTML
+    # <meta charset> tag, which requests doesn't look at for .text
+    # decoding. Left uncorrected, non-ASCII bytes come out as mojibake:
+    # "£" (UTF-8 bytes 0xC2 0xA3) decodes as "Â£" under ISO-8859-1 -- this
+    # is exactly what broke books.toscrape.com's prices in real use.
+    # apparent_encoding runs real content-based detection instead of
+    # blindly assuming ISO-8859-1 just because the header was silent.
+    if "charset" not in (resp.headers.get("content-type") or "").lower():
+        resp.encoding = resp.apparent_encoding
+
     return resp.text
 
 
